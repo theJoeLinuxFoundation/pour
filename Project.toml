@@ -1,0 +1,16 @@
+name = "Pour"
+uuid = "475f7ee8-83d5-4e82-bc65-101576c39a24"
+authors = ["Maja Wittbrodt <ash8820@proton.me>"]
+version = "0.1.0"
+
+[deps]
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
+
+[compat]
+julia = "1.13"

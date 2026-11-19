@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-FileCopyrightText: 2026 Maja Wittbrodt
+
 """Return the real accounts in a source root, skipping daemons and system users."""
 function human_users(root)
     out = NamedTuple[]

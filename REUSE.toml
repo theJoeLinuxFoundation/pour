@@ -1,0 +1,6 @@
+version = 1
+
+[[annotations]]
+path = ["README.md", "Project.toml", ".gitignore"]
+SPDX-FileCopyrightText = "2026 Maja Wittbrodt"
+SPDX-License-Identifier = "BSD-3-Clause"

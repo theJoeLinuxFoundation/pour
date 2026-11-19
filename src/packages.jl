@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-FileCopyrightText: 2026 Maja Wittbrodt
+
 """Source package names mapped to the names dave knows.
 
 Distro package names diverge badly: Debian says `fd-find`, Arch says `fd`,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-FileCopyrightText: 2026 Maja Wittbrodt
+
 """Turn the octal escapes in /proc/mounts back into characters."""
 function unescape_mount(s)
     return replace(s, "\\040" => " ", "\\011" => "\t", "\\012" => "\n", "\\134" => "\\")

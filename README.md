@@ -13,8 +13,8 @@ pour packages <root>        map the old system's packages to dave names
 `plan` never writes. `run` refuses to touch a home directory that already
 holds files. `packages` prints a command and installs nothing.
 
-And every verb refuses a Horizon source outright, with exit code 3. Horizon is
-not something you migrate off: update the machine with `horizon-update`
+And every verb refuses a Euri Linux: Horizon source outright, with exit code 3. Horizon is
+not something you migrate off **period**: update the machine with `horizon-update`
 instead.
 
 ## What it keeps

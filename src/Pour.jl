@@ -19,14 +19,26 @@ const OK = TTY ? "\e[1;32m[ OK ]\e[0m" : "[ OK ]"
 const FAIL = TTY ? "\e[1;31m[FAIL]\e[0m" : "[FAIL]"
 const NOTE = TTY ? "\e[1;34mpour:\e[0m" : "pour:"
 
-"""Print a success line in the dinit shape."""
-ok(msg) = println("$OK $msg")
+"""True while a verb prints JSON events instead of coloured lines, see `with_output`."""
+const JSON_OUTPUT = Ref(false)
 
-"""Print a failure line in the dinit shape."""
-fail(msg) = println("$FAIL $msg")
+"""The last fail line, which becomes the message of a JSON error event."""
+const LAST_FAIL = Ref("")
 
-"""Print a prose line prefixed with the program name."""
-note(msg) = println("$NOTE $msg")
+"""Print a success line in the dinit shape, or a log event in `--json` mode."""
+ok(msg) = JSON_OUTPUT[] ? event("log"; level = "ok", message = msg) : println("$OK $msg")
+
+"""Print a failure line in the dinit shape, or a log event in `--json` mode."""
+function fail(msg)
+    LAST_FAIL[] = msg
+    return JSON_OUTPUT[] ? event("log"; level = "fail", message = msg) : println("$FAIL $msg")
+end
+
+"""Print a prose line prefixed with the program name, or a log event in `--json` mode."""
+note(msg) = JSON_OUTPUT[] ? event("log"; level = "note", message = msg) : println("$NOTE $msg")
+
+"""Print an empty line between sections, except in `--json` mode."""
+blank() = JSON_OUTPUT[] || println()
 
 """Print the usage text."""
 function usage()
@@ -40,9 +52,12 @@ pour $VERSION_STR
   pour packages <root>        map the old system's packages to dave names
 
 Options
-  --dry-run     never write to this machine or to <root>
+  --target DIR  create accounts and homes in the root at DIR, such as a
+                freshly installed disk, instead of on this machine
+  --dry-run     never write to this machine, to <root> or to the target
   --verify      compare hashes after copying (default on)
   --no-verify   skip the hash pass, counts only
+  --json        for scan, plan and run: one JSON event per line on stdout
   --help        this text
   --version     print the version
 """)
@@ -162,16 +177,66 @@ function human(bytes)
     return i == 1 ? "$(Int(v)) $(units[i])" : string(round(v; digits = 1), " ", units[i])
 end
 
-"""Split `args` into flags and positionals without a dependency."""
-function parse_args(args)
+"""Split `args` into positionals, flags and options without a dependency.
+
+The options named in `valued` take a value, as `--target DIR` or
+`--target=DIR`; one given with nothing after it gets the empty string.
+"""
+function parse_args(args; valued = ("--target",))
     flags = Set{String}()
     pos = String[]
-    for a in args
-        startswith(a, "--") ? push!(flags, a) : push!(pos, a)
+    opts = Dict{String,String}()
+    i = 1
+    while i <= length(args)
+        a = args[i]
+        eq = findfirst('=', a)
+        name = eq === nothing ? a : a[1:prevind(a, eq)]
+        if startswith(a, "--") && name in valued
+            if eq !== nothing
+                opts[name] = a[nextind(a, eq):end]
+            elseif i < length(args)
+                i += 1
+                opts[name] = args[i]
+            else
+                opts[name] = ""
+            end
+        elseif startswith(a, "--")
+            push!(flags, a)
+        else
+            push!(pos, a)
+        end
+        i += 1
     end
-    return pos, flags
+    return pos, flags, opts
 end
 
+"""Return the root that accounts are written into, or nothing after a fail line.
+
+Without `--target` that is this machine, `/`. With it, the directory must hold
+etc/passwd and etc/group, as a freshly installed joe does, and must not be
+the source root itself.
+"""
+function target_root(opts, source)
+    haskey(opts, "--target") || return "/"
+    dir = opts["--target"]
+    if isempty(dir)
+        fail("--target needs a directory: --target /mnt/joe")
+        return nothing
+    end
+    dir = abspath(dir)
+    dir = dir == "/" ? dir : rstrip(dir, '/')
+    if !(is_file(joinpath(dir, "etc", "passwd")) && is_file(joinpath(dir, "etc", "group")))
+        fail("$dir is not a target root: no etc/passwd and etc/group")
+        return nothing
+    end
+    if realpath(dir) == realpath(source)
+        fail("$dir is the source root, not a target")
+        return nothing
+    end
+    return String(dir)
+end
+
+include("json.jl")
 include("scan.jl")
 include("plan.jl")
 include("run.jl")
@@ -189,7 +254,7 @@ function main(args)
         println(VERSION_STR)
         return 0
     elseif verb == "scan"
-        return cmd_scan()
+        return cmd_scan(rest)
     elseif verb == "plan"
         return cmd_plan(rest)
     elseif verb == "run"

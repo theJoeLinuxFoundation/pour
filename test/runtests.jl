@@ -24,7 +24,10 @@ function root_fixture(passwd, group)
     return root
 end
 
-"""Build a source root holding one account with a small home."""
+"""A yescrypt hash as it would sit in etc/shadow."""
+const MAJA_HASH = "\$y\$j9T\$kV3cRkl2Q0Yy1mZ\$0mKZbPdQh3cX9y1tT8gW1o2B7l5Qe6Yr4uNcHs/AZ.8"
+
+"""Build a source root holding one account with a small home and a password."""
 function source_fixture()
     root = root_fixture(
         "root:x:0:0:root:/root:/bin/sh\n" *
@@ -34,6 +37,8 @@ function source_fixture()
     mkpath(joinpath(home, ".config"))
     write(joinpath(home, ".bashrc"), "export EDITOR=vim\n")
     write(joinpath(home, ".config", "app.conf"), "x=1\n")
+    write(joinpath(root, "etc", "shadow"),
+          "root:*:20000:0:99999:7:::\nmaja:$MAJA_HASH:20000:0:99999:7:::\n")
     return root
 end
 
@@ -269,4 +274,61 @@ end
     target = target_fixture("maja:x:1000:1000::/home/maja:/bin/sh\n")
     _, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
     @test occursin("account exists in $target", out)
+end
+
+@testset "password hashes are named by scheme" begin
+    @test Pour.hash_scheme(MAJA_HASH) == "yescrypt"
+    @test Pour.hash_scheme("\$6\$salt\$hash") == "sha512crypt"
+    @test Pour.hash_scheme("\$2b\$12\$hash") == "bcrypt"
+    @test Pour.hash_scheme("abcdefghijk./") == "descrypt"
+    @test Pour.hash_scheme("!") == "locked"
+    @test Pour.hash_scheme("!!") == "locked"
+    @test Pour.hash_scheme("!\$6\$salt\$hash") == "locked"
+    @test Pour.hash_scheme("*") == "locked"
+    @test Pour.hash_scheme("") == "empty"
+    @test Pour.hash_scheme("x") == "unknown"
+    @test Pour.password_state(Dict("maja" => MAJA_HASH), "toji") == "missing"
+    @test Pour.password_state(nothing, "maja") == "unreadable"
+    @test Pour.carries_password("yescrypt")
+    @test !Pour.carries_password("locked")
+end
+
+@testset "run carries the hash on chpasswd's stdin" begin
+    root = source_fixture()
+    target = target_fixture()
+    log, runner = recorder()
+    code, _ = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 0
+    @test (["chpasswd", "--prefix", target, "-e"], "maja:$MAJA_HASH\n") in log
+    @test !any(c -> any(a -> occursin(MAJA_HASH, a), c), first.(log))
+    @test findfirst(c -> c[1] == "chpasswd", first.(log)) >
+          findfirst(c -> c[1] == "useradd", first.(log))
+end
+
+@testset "locked, empty and missing passwords are not carried" begin
+    root = source_fixture()
+    write(joinpath(root, "etc", "passwd"),
+          "maja:x:1000:1000::/home/maja:/bin/bash\n" *
+          "toji:x:1001:1001::/home/toji:/bin/sh\n" *
+          "kim:x:1002:1002::/home/kim:/bin/sh\n")
+    write(joinpath(root, "etc", "shadow"), "maja:!:20000::::::\ntoji::20000::::::\n")
+    mkpath(joinpath(root, "home", "toji"))
+    mkpath(joinpath(root, "home", "kim"))
+    target = target_fixture()
+    log, runner = recorder()
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 0
+    @test !any(c -> c[1] == "chpasswd", first.(log))
+    @test occursin("maja: password is locked in the source, account left locked", out)
+    @test occursin("toji: password is empty in the source, account left locked", out)
+    @test occursin("kim: password has no entry in the source's etc/shadow", out)
+    _, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
+    @test occursin("password locked", out)
+    @test occursin("password empty", out)
+end
+
+@testset "plan names the hash scheme" begin
+    root = source_fixture()
+    _, out = captured(() -> Pour.cmd_plan([root, "--target", target_fixture()]))
+    @test occursin("password yescrypt", out)
 end

@@ -108,6 +108,78 @@ function source_privileged(root, username)
     return false
 end
 
+"""crypt(3) prefixes and the scheme each one names."""
+const HASH_SCHEMES = (
+    "\$y\$" => "yescrypt",
+    "\$gy\$" => "gost-yescrypt",
+    "\$7\$" => "scrypt",
+    "\$2b\$" => "bcrypt",
+    "\$2a\$" => "bcrypt",
+    "\$2y\$" => "bcrypt",
+    "\$6\$" => "sha512crypt",
+    "\$5\$" => "sha256crypt",
+    "\$1\$" => "md5crypt",
+    "\$sha1\$" => "sha1crypt",
+    "\$md5" => "sunmd5",
+)
+
+"""Return each account's password hash from the source's etc/shadow, or nothing if unreadable."""
+function source_hashes(root)
+    path = joinpath(root, "etc", "shadow")
+    out = Dict{String,String}()
+    isfile(path) || return out
+    entries = try
+        read_passwd(path)
+    catch
+        return nothing
+    end
+    for f in entries
+        length(f) >= 2 && (out[f[1]] = f[2])
+    end
+    return out
+end
+
+"""Name the scheme of a crypt(3) hash, or say why there is nothing to carry.
+
+`!` and `*` hashes are "locked" and an empty one is "empty"; otherwise the
+result is the scheme, such as "yescrypt" for `\$y\$` or "sha512crypt" for
+`\$6\$`, or "unknown".
+"""
+function hash_scheme(hash)
+    isempty(hash) && return "empty"
+    (startswith(hash, '!') || startswith(hash, '*')) && return "locked"
+    for (prefix, name) in HASH_SCHEMES
+        startswith(hash, prefix) && return name
+    end
+    startswith(hash, '_') && length(hash) == 20 && return "bsdicrypt"
+    length(hash) == 13 && all(c -> isascii(c) && (isletter(c) || isdigit(c) || c in "./"), hash) &&
+        return "descrypt"
+    return "unknown"
+end
+
+"""Return the password state of an account: its hash scheme, or why it has none to carry.
+
+`hashes` comes from `source_hashes`. Beyond `hash_scheme`'s answers this is
+"missing" without an etc/shadow entry and "unreadable" when the file is.
+"""
+function password_state(hashes, name)
+    hashes === nothing && return "unreadable"
+    haskey(hashes, name) || return "missing"
+    return hash_scheme(hashes[name])
+end
+
+"""Return true when a password in this state is a real hash worth carrying."""
+carries_password(state) = !(state in ("locked", "empty", "missing", "unreadable", "unknown"))
+
+"""Explain, for a log line, why a password in this state is not carried."""
+function password_reason(state)
+    state == "locked" && return "is locked in the source"
+    state == "empty" && return "is empty in the source"
+    state == "missing" && return "has no entry in the source's etc/shadow"
+    state == "unreadable" && return "is unreadable: the source's etc/shadow cannot be read"
+    return "uses a hash scheme pour does not know"
+end
+
 """Return true when some group under `target`, this machine by default, already holds this gid."""
 function gid_taken(gid, target = "/")
     return any(read_passwd(joinpath(target, "etc", "group"))) do f
@@ -165,6 +237,7 @@ function cmd_run(args; runner = run_cmd)
     note(dry ? "dry run, nothing will be written" : "migrating from $root")
     target == "/" || note("writing accounts and homes into $target")
     users, groups = local_names(target)
+    hashes = source_hashes(root)
     failures = 0
 
     for u in human_users(root)
@@ -197,6 +270,17 @@ function cmd_run(args; runner = run_cmd)
                 runner(shadow_cmd("useradd", target, "-M", "-u", u.uid, "-g", u.gid,
                                   "-d", u.home, "-s", u.shell, "--", u.name))
                 ok("$(u.name): created user $(u.uid)")
+            end
+            state = password_state(hashes, u.name)
+            if !carries_password(state)
+                note("$(u.name): password $(password_reason(state)), account left locked")
+                note("  set one on the new system with: passwd $(u.name)")
+            elseif dry
+                ok("$(u.name): would carry the password ($state)")
+            else
+                # The hash goes on stdin, never on a command line where ps can see it.
+                runner(shadow_cmd("chpasswd", target, "-e"), "$(u.name):$(hashes[u.name])\n")
+                ok("$(u.name): carried the password ($state)")
             end
         else
             note("$(u.name): account exists here, copying home only")

@@ -50,6 +50,7 @@ function cmd_plan(args)
         return 1
     end
 
+    hashes = source_hashes(root)
     total_files = 0
     total_bytes = 0
     for u in found
@@ -60,9 +61,12 @@ function cmd_plan(args)
         groups = length(source_groups(root, u.name))
         priv = source_privileged(root, u.name) ? ", sudo" : ""
         state = is_dir(src) ? "" : " (home missing)"
+        password = password_state(hashes, u.name)
         ok(string(u.name, " (", u.uid, ":", u.gid, ") ", u.home,
                  ": ", files, " files, ", human(bytes),
-                 ", ", groups, " groups", priv, state))
+                 ", ", groups, " groups", priv, ", password ", password, state))
+        carries_password(password) ||
+            note("$(u.name): password $(password_reason(password)), would stay locked")
         target == "/" && continue
         dst = target_home(target, u.home)
         if u.name in users

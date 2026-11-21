@@ -53,8 +53,15 @@ function cmd_plan(args)
     hashes = source_hashes(root)
     total_files = 0
     total_bytes = 0
+    planned = 0
     for u in found
-        src = source_path(root, u.home)
+        home = safe_home(u.home)
+        if home === nothing
+            fail("$(u.name): home $(u.home) is not /home/<name>, would skip")
+            continue
+        end
+        planned += 1
+        src = source_path(root, home)
         files, bytes = measure(src)
         total_files += files
         total_bytes += bytes
@@ -62,14 +69,17 @@ function cmd_plan(args)
         priv = source_privileged(root, u.name) ? ", sudo" : ""
         state = is_dir(src) ? "" : " (home missing)"
         password = password_state(hashes, u.name)
-        ok(string(u.name, " (", u.uid, ":", u.gid, ") ", u.home,
+        ok(string(u.name, " (", u.uid, ":", u.gid, ") ", home,
                  ": ", files, " files, ", human(bytes),
                  ", ", groups, " groups", priv, ", password ", password, state))
         carries_password(password) ||
             note("$(u.name): password $(password_reason(password)), would stay locked")
         target == "/" && continue
-        dst = target_home(target, u.home)
-        if u.name in users
+        dst = target_home(target, home)
+        link = symlink_on_path(target, dst)
+        if link !== nothing
+            note("$(u.name): $link is a symlink, would not write through it")
+        elseif u.name in users
             note("$(u.name): account exists in $target, would copy the home only")
         elseif is_dir(dst) && !isempty(readdir(dst))
             note("$(u.name): $dst already has files, would not touch it")
@@ -79,7 +89,7 @@ function cmd_plan(args)
     end
 
     println()
-    note("total: $(length(found)) accounts, $total_files files, $(human(total_bytes))")
+    note("total: $planned accounts, $total_files files, $(human(total_bytes))")
     note("nothing was written")
     note("next: pour run $root --users" * (target == "/" ? "" : " --target $target"))
     return 0

@@ -332,3 +332,66 @@ end
     _, out = captured(() -> Pour.cmd_plan([root, "--target", target_fixture()]))
     @test occursin("password yescrypt", out)
 end
+
+@testset "only /home/<name> is accepted as a home" begin
+    @test Pour.safe_home("/home/maja") == "/home/maja"
+    @test Pour.safe_home("/home/maja/") == "/home/maja"
+    @test Pour.safe_home("//home//maja") == "/home/maja"
+    @test Pour.safe_home("/home/./maja") == "/home/maja"
+    @test Pour.safe_home("/home/../etc") === nothing
+    @test Pour.safe_home("/home/maja/../../etc") === nothing
+    @test Pour.safe_home("/home/..") === nothing
+    @test Pour.safe_home("/home") === nothing
+    @test Pour.safe_home("/home/maja/work") === nothing
+    @test Pour.safe_home("/var/lib/maja") === nothing
+    @test Pour.safe_home("/root") === nothing
+    @test Pour.safe_home("home/maja") === nothing
+    @test Pour.safe_home("") === nothing
+end
+
+@testset "run skips an account whose home leaves /home" begin
+    root = source_fixture()
+    write(joinpath(root, "etc", "passwd"),
+          "maja:x:1000:1000::/home/../etc:/bin/bash\n" *
+          "toji:x:1001:1001::/home/toji/../../../../tmp:/bin/sh\n")
+    mkpath(joinpath(root, "etc", "fake"))
+    target = target_fixture()
+    log, runner = recorder()
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 1
+    @test isempty(log)
+    @test occursin("[FAIL] maja: home /home/../etc is not /home/<name>, skipping", out)
+    @test occursin("[FAIL] toji: home", out)
+    @test readdir(joinpath(target, "home")) == []
+    _, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
+    @test occursin("maja: home /home/../etc is not /home/<name>, would skip", out)
+end
+
+@testset "run never writes through a symlink in the destination" begin
+    for linked in ("home", joinpath("home", "maja"))
+        root = source_fixture()
+        target = target_fixture()
+        elsewhere = mktempdir()
+        rm(joinpath(target, linked); recursive = true, force = true)
+        mkpath(dirname(joinpath(target, linked)))
+        symlink(elsewhere, joinpath(target, linked))
+        log, runner = recorder()
+        code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target];
+                                                runner = runner))
+        @test code == 1
+        @test isempty(log)
+        @test occursin("$(joinpath(target, linked)) is a symlink, not writing through it", out)
+        @test isempty(readdir(elsewhere))
+    end
+end
+
+@testset "copy_tree refuses a symlinked destination" begin
+    src = fixture()
+    elsewhere = mktempdir()
+    dst = joinpath(mktempdir(), "copy")
+    symlink(elsewhere, dst)
+    @test_throws ErrorException Pour.copy_tree(src, dst)
+    @test isempty(readdir(elsewhere))
+    @test Pour.symlink_on_path(dirname(dst), joinpath(dst, "sub", "file")) == dst
+    @test Pour.symlink_on_path(elsewhere, joinpath(elsewhere, "a", "b")) === nothing
+end

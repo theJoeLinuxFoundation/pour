@@ -13,6 +13,7 @@ function copy_tree(src, dst; dry = false)
     for (dir, _, entries) in walkdir(src; follow_symlinks = false)
         rel = relpath(dir, src)
         target_dir = rel == "." ? dst : joinpath(dst, rel)
+        !dry && islink(target_dir) && error("$target_dir is a symlink, not writing through it")
         dry || mkpath(target_dir)
         for entry in entries
             s = joinpath(dir, entry)
@@ -208,6 +209,35 @@ end
 """Map a home path from the source's passwd to where it lands under `target`."""
 target_home(target, home) = joinpath(target, lstrip(home, '/'))
 
+"""Return a home path as `/home/<name>`, or nothing when it is anything else.
+
+The path comes from the source's passwd and becomes a destination that root
+writes to, so only one plain component under /home is accepted: no `..`,
+nothing deeper and nothing elsewhere.
+"""
+function safe_home(home)
+    (startswith(home, '/') && !occursin('\0', home)) || return nothing
+    parts = filter(p -> !isempty(p) && p != ".", split(home, '/'))
+    any(==(".."), parts) && return nothing
+    (length(parts) == 2 && parts[1] == "home") || return nothing
+    return "/home/" * parts[2]
+end
+
+"""Return the first path below `base` on the way to `path` that is a symlink, or nothing.
+
+The walk stops at the first component that does not exist, since nothing
+under it can be a link yet.
+"""
+function symlink_on_path(base, path)
+    p = base
+    for part in splitpath(relpath(path, base))
+        p = joinpath(p, part)
+        islink(p) && return p
+        ispath(p) || return nothing
+    end
+    return nothing
+end
+
 """The `run` verb: create accounts and copy their homes.
 
 `runner` executes each external command; tests pass one that records them.
@@ -241,11 +271,23 @@ function cmd_run(args; runner = run_cmd)
     failures = 0
 
     for u in human_users(root)
-        src = source_path(root, u.home)
-        dst = target_home(target, u.home)
+        home = safe_home(u.home)
+        if home === nothing
+            fail("$(u.name): home $(u.home) is not /home/<name>, skipping")
+            failures += 1
+            continue
+        end
+        src = source_path(root, home)
+        dst = target_home(target, home)
 
         if !isdir(src)
             fail("$(u.name): home missing in source, $src")
+            failures += 1
+            continue
+        end
+        link = symlink_on_path(target, dst)
+        if link !== nothing
+            fail("$(u.name): $link is a symlink, not writing through it")
             failures += 1
             continue
         end
@@ -268,7 +310,7 @@ function cmd_run(args; runner = run_cmd)
                 ok("$(u.name): would create user $(u.uid)")
             else
                 runner(shadow_cmd("useradd", target, "-M", "-u", u.uid, "-g", u.gid,
-                                  "-d", u.home, "-s", u.shell, "--", u.name))
+                                  "-d", home, "-s", u.shell, "--", u.name))
                 ok("$(u.name): created user $(u.uid)")
             end
             state = password_state(hashes, u.name)

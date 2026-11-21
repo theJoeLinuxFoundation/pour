@@ -30,7 +30,9 @@ instead.
 - password hashes from etc/shadow, through `chpasswd -e`; a locked or empty
   one is not carried and that account stays locked
 - supplemental group membership, creating groups that do not exist yet
-- home directories, with modes, owners and symlinks exactly as they were
+- home directories, with their modes and symlinks; files lose setuid and
+  setgid, and anything owned by another uid, such as root, is handed to the
+  account
 - a note when the source gave an account sudo, since joe uses doas
 
 ## Build and test

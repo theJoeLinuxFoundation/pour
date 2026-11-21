@@ -4,12 +4,31 @@
 """Change an owner without following symlinks."""
 lchown(path, uid, gid) = ccall(:lchown, Cint, (Cstring, Cuint, Cuint), path, uid, gid)
 
-"""Copy a tree keeping modes, owners and symlinks exactly as they are."""
-function copy_tree(src, dst; dry = false)
+"""Return the owner a copied entry gets, and whether that differs from its own.
+
+Without an `owner` every entry keeps its uid and gid. With one, an entry that
+belongs to any other uid, such as root, goes to the account's uid and gid.
+"""
+function new_owner(uid, gid, owner)
+    (owner === nothing || uid == owner.uid) && return (uid, gid, false)
+    return (owner.uid, owner.gid, true)
+end
+
+"""Copy a tree keeping modes and symlinks, but no setuid or setgid file.
+
+Files lose their setuid and setgid bits; directories keep theirs, which only
+steer the group of new files. With an `owner`, entries owned by another uid
+are handed to it, see `new_owner`. The result counts files, symlinks and
+bytes, the files that were `stripped` and the entries that were `chowned`.
+"""
+function copy_tree(src, dst; dry = false, owner = nothing)
     files = 0
     links = 0
     bytes = 0
-    isdir(src) || return (files = files, links = links, bytes = bytes)
+    stripped = 0
+    chowned = 0
+    stats() = (files = files, links = links, bytes = bytes, stripped = stripped, chowned = chowned)
+    isdir(src) || return stats()
     for (dir, _, entries) in walkdir(src; follow_symlinks = false)
         rel = relpath(dir, src)
         target_dir = rel == "." ? dst : joinpath(dst, rel)
@@ -20,34 +39,35 @@ function copy_tree(src, dst; dry = false)
             d = joinpath(target_dir, entry)
             st = safe_lstat(s)
             st === nothing && continue
+            islink(s) || isfile(s) || continue
+            uid, gid, moved = new_owner(st.uid, st.gid, owner)
+            chowned += moved
             if islink(s)
-                dry || (rm(d; force = true); symlink(readlink(s), d))
+                dry || (rm(d; force = true); symlink(readlink(s), d); lchown(d, uid, gid))
                 links += 1
                 continue
             end
-            if !isfile(s)
-                continue
-            end
-            if dry
-                files += 1
-                bytes += st.size
-                continue
-            end
-            cp(s, d; force = true)
-            chmod(d, st.mode & 0o7777)
-            lchown(d, st.uid, st.gid)
+            mode = st.mode & 0o7777
+            stripped += (mode & 0o6000) != 0
             files += 1
             bytes += st.size
+            dry && continue
+            cp(s, d; force = true)
+            # chown first: it may clear set-id bits itself, chmod then sets the mode exactly.
+            lchown(d, uid, gid)
+            chmod(d, mode & 0o1777)
         end
-        if !dry
-            st = safe_lstat(dir)
-            if st !== nothing
+        st = safe_lstat(dir)
+        if st !== nothing
+            uid, gid, moved = new_owner(st.uid, st.gid, owner)
+            chowned += moved
+            if !dry
+                lchown(target_dir, uid, gid)
                 chmod(target_dir, st.mode & 0o7777)
-                lchown(target_dir, st.uid, st.gid)
             end
         end
     end
-    return (files = files, links = links, bytes = bytes)
+    return stats()
 end
 
 """Compare hashes for a sample of copied files against their sources."""
@@ -346,9 +366,14 @@ function cmd_run(args; runner = run_cmd)
             end
         end
 
-        stats = copy_tree(src, dst; dry = dry)
+        stats = copy_tree(src, dst; dry = dry, owner = (uid = u.uid, gid = u.gid))
         ok(string(u.name, ": ", stats.files, " files, ", stats.links,
                  " symlinks, ", human(stats.bytes), dry ? " (planned)" : ""))
+        stats.stripped > 0 && note(string(u.name, ": ", dry ? "would drop" : "dropped",
+                                          " setuid/setgid from ", stats.stripped, " files"))
+        stats.chowned > 0 && note(string(u.name, ": ", dry ? "would give" : "gave", " ",
+                                         stats.chowned, " entries owned by another uid to ",
+                                         u.name))
 
         if verify && !dry
             v = verify_sample(src, dst)

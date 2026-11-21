@@ -6,15 +6,13 @@ function human_users(root)
     out = NamedTuple[]
     for f in read_passwd(joinpath(root, "etc", "passwd"))
         length(f) >= 7 || continue
-        name, uid, gid, home, shell = f[1], f[3], f[4], f[6], f[7]
-        u = try
-            parse(Int, uid)
-        catch
-            continue
-        end
+        name, home, shell = f[1], f[6], f[7]
+        u = tryparse(Int, f[3])
+        g = tryparse(Int, f[4])
+        (u === nothing || g === nothing) && continue
         (1000 <= u < 60000) || continue
         name == "nobody" && continue
-        push!(out, (name = name, uid = u, gid = gid, home = home, shell = shell))
+        push!(out, (name = name, uid = u, gid = g, home = home, shell = shell))
     end
     return out
 end

@@ -395,3 +395,39 @@ end
     @test Pour.symlink_on_path(dirname(dst), joinpath(dst, "sub", "file")) == dst
     @test Pour.symlink_on_path(elsewhere, joinpath(elsewhere, "a", "b")) === nothing
 end
+
+@testset "copy_tree drops setuid and setgid from files" begin
+    src = fixture()
+    chmod(joinpath(src, "a.txt"), 0o4755)
+    chmod(joinpath(src, "sub", "b.txt"), 0o2750)
+    @test filemode(joinpath(src, "a.txt")) & 0o4000 != 0
+    dst = joinpath(mktempdir(), "copy")
+    stats = Pour.copy_tree(src, dst)
+    @test stats.stripped == 2
+    @test filemode(joinpath(dst, "a.txt")) & 0o7777 == 0o755
+    @test filemode(joinpath(dst, "sub", "b.txt")) & 0o7777 == 0o750
+    @test Pour.copy_tree(src, joinpath(mktempdir(), "copy"); dry = true).stripped == 2
+end
+
+@testset "copy_tree hands entries of other uids to the account" begin
+    @test Pour.new_owner(0, 0, (uid = 1000, gid = 1000)) == (1000, 1000, true)
+    @test Pour.new_owner(1000, 969, (uid = 1000, gid = 1000)) == (1000, 969, false)
+    @test Pour.new_owner(0, 0, nothing) == (0, 0, false)
+    src = fixture()
+    me = (uid = Int(ccall(:getuid, Cuint, ())), gid = Int(ccall(:getgid, Cuint, ())))
+    @test Pour.copy_tree(src, joinpath(mktempdir(), "copy"); owner = me).chowned == 0
+    other = (uid = me.uid + 1, gid = me.gid + 1)
+    # two files, a symlink and two directories belong to someone else
+    @test Pour.copy_tree(src, joinpath(mktempdir(), "copy"); dry = true, owner = other).chowned == 5
+end
+
+@testset "run reports the setuid files it defused" begin
+    root = source_fixture()
+    chmod(joinpath(root, "home", "maja", ".bashrc"), 0o6755)
+    target = target_fixture()
+    _, runner = recorder()
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 0
+    @test occursin("maja: dropped setuid/setgid from 1 files", out)
+    @test filemode(joinpath(target, "home", "maja", ".bashrc")) & 0o7777 == 0o755
+end

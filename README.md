@@ -27,6 +27,30 @@ And every verb refuses a Euri Linux: Horizon source outright, with exit code 3. 
 not something you migrate off **period**: update the machine with `horizon-update`
 instead.
 
+## For the installer
+
+`scan`, `plan` and `run` take `--json` and then print one JSON object per
+line on stdout instead of coloured lines. Exit codes stay the same: 0 done,
+1 a problem, 2 a usage error, 3 a Horizon source.
+
+    {"event":"system","device":"/dev/sda2","root":"/mnt/old","name":"Fedora Linux 42"}
+    {"event":"account","name":"maja","uid":1000,"gid":1000,"home":"/home/maja",
+     "files":5120,"bytes":73400320,"groups":["wheel","docker"],"admin":true,
+     "password":"yescrypt","skip":null}
+    {"event":"progress","account":"maja","files":500,"bytes":1048576}
+    {"event":"result","account":"maja","ok":true,"problems":0,"message":null}
+    {"event":"log","level":"ok","message":"maja: created user 1000"}
+    {"event":"done"}
+    {"event":"error","message":"1 account(s) had problems","code":1}
+
+`system` comes from `scan`, and from `plan` and `run` for the source;
+`device` is null when the root is not a mountpoint. `account` comes from
+`plan`, and from `run` before each account is migrated; `skip` says why it
+would be or was skipped, and `password` is the hash scheme or `locked`,
+`empty`, `missing`, `unreadable` or `unknown`. `progress` and `result` come
+from `run`. `log` carries every line the coloured output would have shown.
+The last line is always `done` or `error`.
+
 ## What it keeps
 
 - accounts, with the source uid and gid
@@ -55,6 +79,7 @@ For one deployable directory:
 ## Layout
 
     src/Pour.jl       module, log helpers, dispatch
+    src/json.jl       the --json event stream
     src/scan.jl       finding mounted installs
     src/plan.jl       the dry run
     src/run.jl        accounts, groups, copying, verification

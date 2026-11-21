@@ -609,3 +609,84 @@ end
     @test code == 0
     @test occursin("dave install fd vim", out)
 end
+
+"""Split JSON output into lines, each of which has to be one event object."""
+function json_lines(out)
+    lines = split(chomp(out), '\n')
+    @test all(l -> startswith(l, "{\"event\":\"") && endswith(l, "}"), lines)
+    return lines
+end
+
+@testset "JSON strings are escaped" begin
+    @test Pour.json_string("plain") == "\"plain\""
+    @test Pour.json_string("a\"b\\c") == "\"a\\\"b\\\\c\""
+    @test Pour.json_string("line\nnext\ttab\r") == "\"line\\nnext\\ttab\\r\""
+    @test Pour.json_string("\x01\x1f\x7f") == "\"\\u0001\\u001f\\u007f\""
+    @test Pour.json_string("Żółć ☕") == "\"Żółć ☕\""
+    @test Pour.json_string(String([0x61, 0xff, 0x62])) == "\"a\\ufffdb\""
+    @test sprint(Pour.json_value, (a = 1, b = [true, nothing], c = "x")) ==
+          "{\"a\":1,\"b\":[true,null],\"c\":\"x\"}"
+end
+
+@testset "plan --json prints one event per line" begin
+    root = source_fixture()
+    target = target_fixture()
+    code, out = captured(() -> Pour.cmd_plan([root, "--target", target, "--json"]))
+    @test code == 0
+    lines = json_lines(out)
+    files, bytes = Pour.measure(joinpath(root, "home", "maja"))
+    @test "{\"event\":\"system\",\"device\":null,\"root\":$(Pour.json_string(root))," *
+          "\"name\":\"Test Linux\"}" in lines
+    @test "{\"event\":\"account\",\"name\":\"maja\",\"uid\":1000,\"gid\":1000," *
+          "\"home\":\"/home/maja\",\"files\":$files,\"bytes\":$bytes," *
+          "\"groups\":[\"wheel\",\"docker\"],\"admin\":true,\"password\":\"yescrypt\"," *
+          "\"skip\":null}" in lines
+    @test lines[end] == "{\"event\":\"done\"}"
+    @test !any(l -> occursin("[ OK ]", l), lines)
+    # the next verb without --json is back to coloured lines
+    @test captured(() -> Pour.ok("plain again"))[2] == "[ OK ] plain again\n"
+end
+
+@testset "run --json reports accounts, progress and results" begin
+    root = source_fixture()
+    write(joinpath(root, "etc", "passwd"),
+          "maja:x:1000:1000::/home/maja:/bin/bash\ntoji:x:1001:1001::/home/toji:/bin/sh\n")
+    mkpath(joinpath(root, "home", "toji"))
+    write(joinpath(root, "home", "toji", "notes"), "hi")
+    target = target_fixture("joe:x:1000:1000::/home/joe:/bin/sh\n", "joe:x:1000:\n")
+    _, runner = recorder()
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target, "--json"];
+                                            runner = runner))
+    @test code == 1
+    lines = json_lines(out)
+    kinds = [match(r"^\{\"event\":\"(\w+)\"", l)[1] for l in lines]
+    @test filter(!=("log"), kinds) ==
+          ["system", "account", "result", "account", "progress", "result", "error"]
+    @test any(l -> startswith(l, "{\"event\":\"account\",\"name\":\"maja\"") &&
+                   endswith(l, "\"skip\":\"uid 1000 is taken by joe in the target\"}"), lines)
+    @test "{\"event\":\"result\",\"account\":\"maja\",\"ok\":false,\"problems\":1," *
+          "\"message\":\"maja: uid 1000 is taken by joe in the target, skipping\"}" in lines
+    @test "{\"event\":\"progress\",\"account\":\"toji\",\"files\":1,\"bytes\":2}" in lines
+    @test "{\"event\":\"result\",\"account\":\"toji\",\"ok\":true,\"problems\":0," *
+          "\"message\":null}" in lines
+    @test lines[end] == "{\"event\":\"error\",\"message\":\"1 account(s) had problems\",\"code\":1}"
+end
+
+@testset "--json keeps the exit codes" begin
+    root = root_fixture("maja:x:1000:1000::/home/maja:/bin/bash\n", "wheel:x:10:maja\n")
+    write(joinpath(root, "etc", "os-release"), "NAME=\"Euri Linux\"\nID=euri\n")
+    code, out = captured(() -> Pour.cmd_plan([root, "--json"]))
+    @test code == 3
+    @test json_lines(out)[end] ==
+          "{\"event\":\"error\",\"message\":\"this is Horizon: not migrating\",\"code\":3}"
+    code, out = captured(() -> Pour.cmd_run([mktempdir(), "--users", "--json"]))
+    @test code == 2
+    @test occursin("\"code\":2}", json_lines(out)[end])
+    code, out = captured(() -> Pour.cmd_scan(["--json"]))
+    lines = json_lines(out)
+    @test lines[end] == (code == 0 ? "{\"event\":\"done\"}" :
+                         "{\"event\":\"error\",\"message\":\"nothing found\",\"code\":1}")
+    code, out = captured(() -> Pour.with_output(() -> error("boom"), ["--json"]))
+    @test code == 1
+    @test occursin("boom", json_lines(out)[end])
+end

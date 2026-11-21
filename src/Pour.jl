@@ -19,14 +19,26 @@ const OK = TTY ? "\e[1;32m[ OK ]\e[0m" : "[ OK ]"
 const FAIL = TTY ? "\e[1;31m[FAIL]\e[0m" : "[FAIL]"
 const NOTE = TTY ? "\e[1;34mpour:\e[0m" : "pour:"
 
-"""Print a success line in the dinit shape."""
-ok(msg) = println("$OK $msg")
+"""True while a verb prints JSON events instead of coloured lines, see `with_output`."""
+const JSON_OUTPUT = Ref(false)
 
-"""Print a failure line in the dinit shape."""
-fail(msg) = println("$FAIL $msg")
+"""The last fail line, which becomes the message of a JSON error event."""
+const LAST_FAIL = Ref("")
 
-"""Print a prose line prefixed with the program name."""
-note(msg) = println("$NOTE $msg")
+"""Print a success line in the dinit shape, or a log event in `--json` mode."""
+ok(msg) = JSON_OUTPUT[] ? event("log"; level = "ok", message = msg) : println("$OK $msg")
+
+"""Print a failure line in the dinit shape, or a log event in `--json` mode."""
+function fail(msg)
+    LAST_FAIL[] = msg
+    return JSON_OUTPUT[] ? event("log"; level = "fail", message = msg) : println("$FAIL $msg")
+end
+
+"""Print a prose line prefixed with the program name, or a log event in `--json` mode."""
+note(msg) = JSON_OUTPUT[] ? event("log"; level = "note", message = msg) : println("$NOTE $msg")
+
+"""Print an empty line between sections, except in `--json` mode."""
+blank() = JSON_OUTPUT[] || println()
 
 """Print the usage text."""
 function usage()
@@ -45,6 +57,7 @@ Options
   --dry-run     never write to this machine, to <root> or to the target
   --verify      compare hashes after copying (default on)
   --no-verify   skip the hash pass, counts only
+  --json        for scan, plan and run: one JSON event per line on stdout
   --help        this text
   --version     print the version
 """)
@@ -223,6 +236,7 @@ function target_root(opts, source)
     return String(dir)
 end
 
+include("json.jl")
 include("scan.jl")
 include("plan.jl")
 include("run.jl")
@@ -240,7 +254,7 @@ function main(args)
         println(VERSION_STR)
         return 0
     elseif verb == "scan"
-        return cmd_scan()
+        return cmd_scan(rest)
     elseif verb == "plan"
         return cmd_plan(rest)
     elseif verb == "run"

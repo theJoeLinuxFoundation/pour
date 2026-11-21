@@ -20,8 +20,25 @@ end
 """Map a home path from inside the source root to a path on this machine."""
 source_path(root, home) = joinpath(root, lstrip(home, '/'))
 
-"""The `plan` verb: report a migration without writing anything."""
-function cmd_plan(args)
+"""Print the JSON account event for `u`, checked as `c` by `check_account`.
+
+`skip` is why the account would be or was skipped, or null. `password` is
+the hash scheme, such as "yescrypt", or "locked", "empty", "missing",
+"unreadable" or "unknown" when no password is carried.
+"""
+function account_event(u, c, root, hashes, files, bytes)
+    event("account"; name = u.name, uid = u.uid, gid = u.gid, home = c.home,
+          files = files, bytes = bytes,
+          groups = [g for (g, _) in source_groups(root, u.name)],
+          admin = source_privileged(root, u.name),
+          password = password_state(hashes, u.name), skip = c.problem)
+end
+
+"""The `plan` verb, with output as `args` ask for; see `with_output`."""
+cmd_plan(args) = with_output(() -> plan_verb(args), args)
+
+"""Report a migration without writing anything."""
+function plan_verb(args)
     pos, _, opts = parse_args(args)
     if isempty(pos)
         fail("plan needs a root: pour plan /mnt/old")
@@ -39,6 +56,7 @@ function cmd_plan(args)
 
     note("planning a migration from $root")
     ok("source: $(describe(root))")
+    system_event(root)
     target == "/" || ok("target: $target")
 
     found = human_users(root)
@@ -56,9 +74,11 @@ function cmd_plan(args)
         c = check_account(u, root, target, ids)
         if isempty(c.src)
             fail("$(u.name): $(c.problem), would skip")
+            account_event(u, c, root, hashes, 0, 0)
             continue
         end
         files, bytes = measure(c.src)
+        account_event(u, c, root, hashes, files, bytes)
         groups = length(source_groups(root, u.name))
         priv = source_privileged(root, u.name) ? ", sudo" : ""
         password = password_state(hashes, u.name)
@@ -80,7 +100,7 @@ function cmd_plan(args)
         total_bytes += bytes
     end
 
-    println()
+    blank()
     note("total: $planned accounts, $total_files files, $(human(total_bytes))")
     skipped = length(found) - planned
     skipped > 0 && note("$skipped account(s) would be skipped")

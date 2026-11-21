@@ -20,15 +20,19 @@ Files lose their setuid and setgid bits; directories keep theirs, which only
 steer the group of new files. With an `owner`, entries owned by another uid
 are handed to it, see `new_owner`. The result counts files, symlinks and
 bytes, the files that were `stripped` and the entries that were `chowned`.
+`progress`, when given, is called with the files and bytes so far every 500
+files or second, and once at the end.
 """
-function copy_tree(src, dst; dry = false, owner = nothing)
+function copy_tree(src, dst; dry = false, owner = nothing, progress = nothing)
     files = 0
     links = 0
     bytes = 0
     stripped = 0
     chowned = 0
     stats() = (files = files, links = links, bytes = bytes, stripped = stripped, chowned = chowned)
-    isdir(src) || return stats()
+    reported = time()
+    tick() = (progress === nothing || progress(files, bytes); reported = time())
+    isdir(src) || (tick(); return stats())
     for (dir, _, entries) in walkdir(src; follow_symlinks = false)
         rel = relpath(dir, src)
         target_dir = rel == "." ? dst : joinpath(dst, rel)
@@ -51,6 +55,7 @@ function copy_tree(src, dst; dry = false, owner = nothing)
             stripped += (mode & 0o6000) != 0
             files += 1
             bytes += st.size
+            (files % 500 == 0 || time() - reported >= 1) && tick()
             dry && continue
             cp(s, d; force = true)
             # chown first: it may clear set-id bits itself, chmod then sets the mode exactly.
@@ -67,6 +72,7 @@ function copy_tree(src, dst; dry = false, owner = nothing)
             end
         end
     end
+    tick()
     return stats()
 end
 
@@ -393,6 +399,10 @@ alone after the first.
 """
 function migrate_account(u, ctx)
     c = check_account(u, ctx.root, ctx.target, ctx.ids)
+    if JSON_OUTPUT[]
+        files, bytes = isempty(c.src) ? (0, 0) : measure(c.src)
+        account_event(u, c, ctx.root, ctx.hashes, files, bytes)
+    end
     if c.problem !== nothing
         fail("$(u.name): $(c.problem), skipping")
         return 1
@@ -445,7 +455,8 @@ function migrate_account(u, ctx)
              "usermod", "-aG", gname, "--", u.name) || (problems += 1)
     end
 
-    stats = copy_tree(c.src, c.dst; dry = ctx.dry, owner = (uid = u.uid, gid = u.gid))
+    stats = copy_tree(c.src, c.dst; dry = ctx.dry, owner = (uid = u.uid, gid = u.gid),
+                      progress = (f, b) -> event("progress"; account = u.name, files = f, bytes = b))
     ok(string(u.name, ": ", stats.files, " files, ", stats.links,
              " symlinks, ", human(stats.bytes), ctx.dry ? " (planned)" : ""))
     stats.stripped > 0 && note(string(u.name, ": ", ctx.dry ? "would drop" : "dropped",
@@ -465,13 +476,17 @@ function migrate_account(u, ctx)
     return problems
 end
 
-"""The `run` verb: create accounts and copy their homes.
+"""The `run` verb, with output as `args` ask for; see `with_output` and `run_verb`."""
+cmd_run(args; runner = run_cmd) = with_output(() -> run_verb(args; runner = runner), args)
+
+"""Create accounts and copy their homes.
 
 `runner` executes each external command, see `run_cmd`; tests pass one that
 records them. A problem with one account is a fail line and a non-zero exit,
-and the other accounts still go ahead.
+and the other accounts still go ahead. In `--json` mode each account ends
+with a result event: `ok`, the number of `problems` and the last fail line.
 """
-function cmd_run(args; runner = run_cmd)
+function run_verb(args; runner = run_cmd)
     pos, flags, opts = parse_args(args)
     if isempty(pos)
         fail("run needs a root: pour run /mnt/old --users")
@@ -487,19 +502,21 @@ function cmd_run(args; runner = run_cmd)
     dry = "--dry-run" in flags
     verify = !("--no-verify" in flags)
     if !("--users" in flags)
-        note("nothing selected; pass --users to migrate accounts and homes")
+        fail("nothing selected; pass --users to migrate accounts and homes")
         return 2
     end
 
     refuse_horizon(root) && return 3
 
     note(dry ? "dry run, nothing will be written" : "migrating from $root")
+    system_event(root)
     target == "/" || note("writing accounts and homes into $target")
     ctx = (root = root, target = target, dry = dry, verify = verify, runner = runner,
            ids = taken_ids(target), hashes = source_hashes(root))
     failures = 0
 
     for u in human_users(root)
+        LAST_FAIL[] = ""
         problems = try
             migrate_account(u, ctx)
         catch e
@@ -507,6 +524,8 @@ function cmd_run(args; runner = run_cmd)
             fail("$(u.name): $(sprint(showerror, e))")
             1
         end
+        event("result"; account = u.name, ok = problems == 0, problems = problems,
+              message = problems == 0 ? nothing : LAST_FAIL[])
         failures += problems > 0
     end
 
@@ -517,7 +536,7 @@ function cmd_run(args; runner = run_cmd)
         note("  then: " * join(shadow_cmd("usermod", target, "-aG", "wheel", u.name).exec, " "))
     end
 
-    println()
+    blank()
     if failures == 0
         note("done, no failures")
         return 0

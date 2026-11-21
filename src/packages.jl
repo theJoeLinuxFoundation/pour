@@ -7,15 +7,15 @@ Distro package names diverge badly: Debian says `fd-find`, Arch says `fd`,
 Fedora says `fd-find` again, and one of them calls the same thing `util-linux`
 in three different splits. Every entry here is a guess that a human has to
 confirm, which is why `packages` only prints a command and never runs one.
+
+Every value has to be the name of a joe recipe; a package joe does not carry
+has no entry, and the test suite checks the values against joe's names.
 """
 const PACKAGE_MAP = Dict(
     # editors
     "vim" => "vim",
     "vim-enhanced" => "vim",
-    "neovim" => "neovim",
     "nano" => "nano",
-    "emacs" => "emacs",
-    "helix" => "helix",
 
     # shells
     "bash" => "bash",
@@ -33,18 +33,12 @@ const PACKAGE_MAP = Dict(
     "openssh" => "openssh",
     "gnupg" => "gnupg",
     "gnupg2" => "gnupg",
-    "age" => "age",
-    "pass" => "pass",
 
     # terminals and monitoring
     "htop" => "htop",
-    "btop" => "btop",
     "tmux" => "tmux",
-    "screen" => "screen",
     "lsof" => "lsof",
     "strace" => "strace",
-    "ltrace" => "ltrace",
-    "iotop" => "iotop",
     "ncdu" => "ncdu",
     "sysstat" => "sysstat",
     "tree" => "tree",
@@ -58,24 +52,21 @@ const PACKAGE_MAP = Dict(
     "less" => "less",
     "man-db" => "man-db",
     "man" => "man-db",
-    "unzip" => "unzip",
     "zip" => "zip",
     "xz-utils" => "xz",
     "xz" => "xz",
-    "p7zip" => "p7zip",
+    "p7zip" => "7zip",
     "tar" => "tar",
 
     # storage and disks
     "e2fsprogs" => "e2fsprogs",
     "btrfs-progs" => "btrfs-progs",
     "dosfstools" => "dosfstools",
-    "ntfs-3g" => "ntfs-3g",
     "cryptsetup" => "cryptsetup",
     "lvm2" => "lvm2",
     "parted" => "parted",
     "gparted" => "gparted",
     "smartmontools" => "smartmontools",
-    "hdparm" => "hdparm",
 
     # network
     "network-manager" => "networkmanager",
@@ -84,18 +75,17 @@ const PACKAGE_MAP = Dict(
     "wpa_supplicant" => "wpa_supplicant",
     "wireguard-tools" => "wireguard-tools",
     "openvpn" => "openvpn",
-    "nmap" => "nmap",
     "tcpdump" => "tcpdump",
-    "iperf3" => "iperf",
-    "bind-utils" => "bind-utils",
-    "dnsutils" => "bind-utils",
+    "iperf3" => "iperf3",
+    "bind-utils" => "bind",
+    "dnsutils" => "bind",
     "traceroute" => "traceroute",
     "mtr" => "mtr",
-    "networkmanagerapplet" => "networkmanager",
+    "networkmanagerapplet" => "network-manager-applet",
 
     # development
-    "gcc" => "clang",
-    "g++" => "clang",
+    "gcc" => "gcc",
+    "g++" => "gcc",
     "make" => "make",
     "cmake" => "cmake",
     "meson" => "meson",
@@ -103,9 +93,9 @@ const PACKAGE_MAP = Dict(
     "ninja" => "ninja",
     "pkg-config" => "pkgconf",
     "pkgconf" => "pkgconf",
-    "python3" => "python3",
-    "python3-pip" => "python3",
-    "pip" => "python3",
+    "python3" => "python",
+    "python3-pip" => "python",
+    "pip" => "python",
     "nodejs" => "nodejs",
     "npm" => "nodejs",
     "rustc" => "rust",
@@ -114,26 +104,21 @@ const PACKAGE_MAP = Dict(
     "docker.io" => "docker",
     "docker" => "docker",
     "podman" => "podman",
-    "qemu" => "qemu",
+    "qemu" => "qemu-base",
 
     # desktop
     "firefox" => "firefox",
-    "chromium" => "chromium",
-    "thunderbird" => "thunderbird",
     "libreoffice" => "libreoffice",
     "gimp" => "gimp",
     "inkscape" => "inkscape",
-    "blender" => "blender",
     "vlc" => "vlc",
     "mpv" => "mpv",
     "ffmpeg" => "ffmpeg",
     "obs-studio" => "obs-studio",
     "keepassxc" => "keepassxc",
-    "qbittorrent" => "qbittorrent",
     "transmission-gtk" => "transmission",
-    "gnome" => "gnome",
-    "gnome-shell" => "gnome",
-    "plasma-desktop" => "plasma",
+    "gnome" => "gnome-shell",
+    "gnome-shell" => "gnome-shell",
 )
 
 """Where an rpm database lives in a root: sqlite, ndb or Berkeley DB, in

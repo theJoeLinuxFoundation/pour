@@ -162,9 +162,38 @@ end
 
 @testset "package mapping covers both naming conventions" begin
     @test Pour.PACKAGE_MAP["fd-find"] == "fd"
-    @test Pour.PACKAGE_MAP["gcc"] == "clang"
+    @test Pour.PACKAGE_MAP["gcc"] == "gcc"
     @test Pour.PACKAGE_MAP["network-manager"] == "networkmanager"
     @test Pour.PACKAGE_MAP["openssh-client"] == "openssh"
+end
+
+"""joe recipe names that PACKAGE_MAP may point at, checked against joe's recipe list.
+
+A new value in the table has to be added here, after checking that joe has
+a recipe of that name.
+"""
+const JOE_RECIPES = Set([
+    "7zip", "bash", "bind", "btrfs-progs", "cmake", "cryptsetup", "curl", "dash", "docker",
+    "dosfstools", "e2fsprogs", "fd", "ffmpeg", "firefox", "fish", "fzf", "gcc", "gimp",
+    "git", "gnome-shell", "gnupg", "go", "gparted", "htop", "inkscape", "iperf3", "iwd",
+    "jq", "keepassxc", "less", "libreoffice", "lsof", "lvm2", "make", "man-db", "meson",
+    "mpv", "mtr", "nano", "ncdu", "network-manager-applet", "networkmanager", "ninja",
+    "nodejs", "obs-studio", "openssh", "openvpn", "parted", "pkgconf", "podman", "python",
+    "qemu-base", "ripgrep", "rsync", "rust", "smartmontools", "strace", "sysstat", "tar",
+    "tcpdump", "tmux", "traceroute", "transmission", "tree", "vim", "vlc", "wget",
+    "wireguard-tools", "wpa_supplicant", "xz", "zip", "zsh",
+])
+
+@testset "every mapped package is a joe recipe" begin
+    @test isempty(setdiff(Set(values(Pour.PACKAGE_MAP)), JOE_RECIPES))
+    @test Pour.PACKAGE_MAP["g++"] == "gcc"
+    @test Pour.PACKAGE_MAP["python3"] == "python"
+    @test Pour.PACKAGE_MAP["pip"] == "python"
+    @test Pour.PACKAGE_MAP["p7zip"] == "7zip"
+    @test Pour.PACKAGE_MAP["iperf3"] == "iperf3"
+    @test Pour.PACKAGE_MAP["bind-utils"] == "bind"
+    @test Pour.PACKAGE_MAP["dnsutils"] == "bind"
+    @test Pour.PACKAGE_MAP["qemu"] == "qemu-base"
 end
 
 @testset "scan and packages refuse a non-root" begin

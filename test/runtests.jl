@@ -690,3 +690,20 @@ end
     @test code == 1
     @test occursin("boom", json_lines(out)[end])
 end
+
+@testset "copy_tree copies under umask 077 and puts the umask back" begin
+    before = Pour.umask(0o022)
+    Pour.umask(before)
+    src = fixture()
+    chmod(joinpath(src, "sub"), 0o755)
+    chmod(joinpath(src, "a.txt"), 0o644)
+    dst = joinpath(mktempdir(), "home", "maja")
+    Pour.copy_tree(src, dst)
+    after = Pour.umask(before)
+    @test after == before
+    # final modes are the source's, not the umask's
+    @test filemode(joinpath(dst, "sub")) & 0o777 == 0o755
+    @test filemode(joinpath(dst, "a.txt")) & 0o777 == 0o644
+    # the parent of the home is made with the usual umask, not 077
+    @test filemode(dirname(dst)) & 0o777 == 0o777 & ~before
+end

@@ -4,6 +4,9 @@
 """Change an owner without following symlinks."""
 lchown(path, uid, gid) = ccall(:lchown, Cint, (Cstring, Cuint, Cuint), path, uid, gid)
 
+"""Set the process umask and return the previous one."""
+umask(mask) = ccall(:umask, Cuint, (Cuint,), mask)
+
 """Return the owner a copied entry gets, and whether that differs from its own.
 
 Without an `owner` every entry keeps its uid and gid. With one, an entry that
@@ -22,6 +25,12 @@ are handed to it, see `new_owner`. The result counts files, symlinks and
 bytes, the files that were `stripped` and the entries that were `chowned`.
 `progress`, when given, is called with the files and bytes so far every 500
 files or second, and once at the end.
+
+`cp` creates each file with its source's mode, set-id bits included, and as
+root the write does not clear them, so until the chown and chmod below a
+copied setuid file is setuid root. The tree is therefore copied under umask
+077: such a file is never runnable by anyone but root, and nothing half
+copied is readable by others. Only the parent of `dst` gets the usual umask.
 """
 function copy_tree(src, dst; dry = false, owner = nothing, progress = nothing)
     files = 0
@@ -33,44 +42,50 @@ function copy_tree(src, dst; dry = false, owner = nothing, progress = nothing)
     reported = time()
     tick() = (progress === nothing || progress(files, bytes); reported = time())
     isdir(src) || (tick(); return stats())
-    for (dir, _, entries) in walkdir(src; follow_symlinks = false)
-        rel = relpath(dir, src)
-        target_dir = rel == "." ? dst : joinpath(dst, rel)
-        !dry && islink(target_dir) && error("$target_dir is a symlink, not writing through it")
-        dry || mkpath(target_dir)
-        for entry in entries
-            s = joinpath(dir, entry)
-            d = joinpath(target_dir, entry)
-            st = safe_lstat(s)
-            st === nothing && continue
-            islink(s) || isfile(s) || continue
-            uid, gid, moved = new_owner(st.uid, st.gid, owner)
-            chowned += moved
-            if islink(s)
-                dry || (rm(d; force = true); symlink(readlink(s), d); lchown(d, uid, gid))
-                links += 1
-                continue
+    dry || mkpath(dirname(dst))
+    saved = dry ? nothing : umask(0o077)
+    try
+        for (dir, _, entries) in walkdir(src; follow_symlinks = false)
+            rel = relpath(dir, src)
+            target_dir = rel == "." ? dst : joinpath(dst, rel)
+            !dry && islink(target_dir) && error("$target_dir is a symlink, not writing through it")
+            dry || mkpath(target_dir)
+            for entry in entries
+                s = joinpath(dir, entry)
+                d = joinpath(target_dir, entry)
+                st = safe_lstat(s)
+                st === nothing && continue
+                islink(s) || isfile(s) || continue
+                uid, gid, moved = new_owner(st.uid, st.gid, owner)
+                chowned += moved
+                if islink(s)
+                    dry || (rm(d; force = true); symlink(readlink(s), d); lchown(d, uid, gid))
+                    links += 1
+                    continue
+                end
+                mode = st.mode & 0o7777
+                stripped += (mode & 0o6000) != 0
+                files += 1
+                bytes += st.size
+                (files % 500 == 0 || time() - reported >= 1) && tick()
+                dry && continue
+                cp(s, d; force = true)
+                # chown first: it may clear set-id bits itself, chmod then sets the mode exactly.
+                lchown(d, uid, gid)
+                chmod(d, mode & 0o1777)
             end
-            mode = st.mode & 0o7777
-            stripped += (mode & 0o6000) != 0
-            files += 1
-            bytes += st.size
-            (files % 500 == 0 || time() - reported >= 1) && tick()
-            dry && continue
-            cp(s, d; force = true)
-            # chown first: it may clear set-id bits itself, chmod then sets the mode exactly.
-            lchown(d, uid, gid)
-            chmod(d, mode & 0o1777)
-        end
-        st = safe_lstat(dir)
-        if st !== nothing
-            uid, gid, moved = new_owner(st.uid, st.gid, owner)
-            chowned += moved
-            if !dry
-                lchown(target_dir, uid, gid)
-                chmod(target_dir, st.mode & 0o7777)
+            st = safe_lstat(dir)
+            if st !== nothing
+                uid, gid, moved = new_owner(st.uid, st.gid, owner)
+                chowned += moved
+                if !dry
+                    lchown(target_dir, uid, gid)
+                    chmod(target_dir, st.mode & 0o7777)
+                end
             end
         end
+    finally
+        saved === nothing || umask(saved)
     end
     tick()
     return stats()

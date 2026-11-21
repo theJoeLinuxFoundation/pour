@@ -73,10 +73,10 @@ function verify_sample(src, dst; limit = 200)
     return (checked = checked, bad = bad)
 end
 
-"""Return the names in this machine's passwd and group files."""
-function local_names()
-    users = Set(f[1] for f in read_passwd("/etc/passwd") if length(f) >= 7)
-    groups = Set(f[1] for f in read_passwd("/etc/group") if length(f) >= 3)
+"""Return the names in the passwd and group files under `target`, this machine by default."""
+function local_names(target = "/")
+    users = Set(f[1] for f in read_passwd(joinpath(target, "etc", "passwd")) if length(f) >= 7)
+    groups = Set(f[1] for f in read_passwd(joinpath(target, "etc", "group")) if length(f) >= 3)
     return users, groups
 end
 
@@ -108,16 +108,40 @@ function source_privileged(root, username)
     return false
 end
 
-"""Return true when some group already holds this gid."""
-function gid_taken(gid)
-    return any(read_passwd("/etc/group")) do f
+"""Return true when some group under `target`, this machine by default, already holds this gid."""
+function gid_taken(gid, target = "/")
+    return any(read_passwd(joinpath(target, "etc", "group"))) do f
         length(f) >= 3 && f[3] == string(gid)
     end
 end
 
-"""The `run` verb: create accounts and copy their homes."""
-function cmd_run(args)
-    pos, flags = parse_args(args)
+"""Build a shadow command line that edits the passwd and group files under `target`.
+
+On this machine's own root it is the plain tool. Anywhere else the tool gets
+`--prefix target`, which shadow's useradd, groupadd, usermod and chpasswd all
+take, so nothing on the running system changes. Names go after `--` so that
+one starting with a dash is never read as an option.
+"""
+function shadow_cmd(tool, target, args...)
+    prefix = target == "/" ? String[] : ["--prefix", target]
+    return Cmd([tool; prefix; String[string(a) for a in args]])
+end
+
+"""Run an external command, with `input` on its stdin when given."""
+function run_cmd(cmd, input = nothing)
+    run(input === nothing ? cmd : pipeline(cmd; stdin = IOBuffer(input)))
+    return true
+end
+
+"""Map a home path from the source's passwd to where it lands under `target`."""
+target_home(target, home) = joinpath(target, lstrip(home, '/'))
+
+"""The `run` verb: create accounts and copy their homes.
+
+`runner` executes each external command; tests pass one that records them.
+"""
+function cmd_run(args; runner = run_cmd)
+    pos, flags, opts = parse_args(args)
     if isempty(pos)
         fail("run needs a root: pour run /mnt/old --users")
         return 2
@@ -127,6 +151,8 @@ function cmd_run(args)
         fail("$root is not a Linux root: no etc/os-release")
         return 2
     end
+    target = target_root(opts, root)
+    target === nothing && return 2
     dry = "--dry-run" in flags
     verify = !("--no-verify" in flags)
     if !("--users" in flags)
@@ -137,12 +163,13 @@ function cmd_run(args)
     refuse_horizon(root) && return 3
 
     note(dry ? "dry run, nothing will be written" : "migrating from $root")
-    users, groups = local_names()
+    target == "/" || note("writing accounts and homes into $target")
+    users, groups = local_names(target)
     failures = 0
 
     for u in human_users(root)
         src = source_path(root, u.home)
-        dst = u.home
+        dst = target_home(target, u.home)
 
         if !isdir(src)
             fail("$(u.name): home missing in source, $src")
@@ -156,18 +183,19 @@ function cmd_run(args)
         end
 
         if !(u.name in users)
-            if !gid_taken(u.gid) && !(u.name in groups)
+            if !gid_taken(u.gid, target) && !(u.name in groups)
                 if dry
                     ok("$(u.name): would create group $(u.name) ($(u.gid))")
                 else
-                    run(`groupadd -g $(u.gid) $(u.name)`)
+                    runner(shadow_cmd("groupadd", target, "-g", u.gid, "--", u.name))
                     ok("$(u.name): created group $(u.name) ($(u.gid))")
                 end
             end
             if dry
                 ok("$(u.name): would create user $(u.uid)")
             else
-                run(`useradd -M -u $(u.uid) -g $(u.gid) -d $(u.home) -s $(u.shell) $(u.name)`)
+                runner(shadow_cmd("useradd", target, "-M", "-u", u.uid, "-g", u.gid,
+                                  "-d", u.home, "-s", u.shell, "--", u.name))
                 ok("$(u.name): created user $(u.uid)")
             end
         else
@@ -176,18 +204,18 @@ function cmd_run(args)
 
         for (gname, gid) in source_groups(root, u.name)
             gname in ("wheel", "sudo", "admin") && continue
-            if !(gname in groups) && !gid_taken(gid)
+            if !(gname in groups) && !gid_taken(gid, target)
                 if dry
                     ok("$(u.name): would create group $gname ($gid)")
                 else
-                    run(`groupadd -g $(gid) $(gname)`)
+                    runner(shadow_cmd("groupadd", target, "-g", gid, "--", gname))
                     ok("$(u.name): created group $gname ($gid)")
                 end
             end
             if dry
                 ok("$(u.name): would join group $gname")
             else
-                run(`usermod -aG $(gname) $(u.name)`)
+                runner(shadow_cmd("usermod", target, "-aG", gname, "--", u.name))
                 ok("$(u.name): joined group $gname")
             end
         end
@@ -210,8 +238,8 @@ function cmd_run(args)
     for u in human_users(root)
         source_privileged(root, u.name) || continue
         note("$(u.name): had sudo in the source; joe uses doas")
-        note("  add to /etc/doas.conf: permit persist :wheel")
-        note("  then: usermod -aG wheel $(u.name)")
+        note("  add to $(joinpath(target, "etc", "doas.conf")): permit persist :wheel")
+        note("  then: " * join(shadow_cmd("usermod", target, "-aG", "wheel", u.name).exec, " "))
     end
 
     println()

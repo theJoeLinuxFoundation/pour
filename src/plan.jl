@@ -24,7 +24,7 @@ source_path(root, home) = joinpath(root, lstrip(home, '/'))
 
 """The `plan` verb: report a migration without writing anything."""
 function cmd_plan(args)
-    pos, _ = parse_args(args)
+    pos, _, opts = parse_args(args)
     if isempty(pos)
         fail("plan needs a root: pour plan /mnt/old")
         return 2
@@ -34,11 +34,15 @@ function cmd_plan(args)
         fail("$root is not a Linux root: no etc/os-release")
         return 2
     end
+    target = target_root(opts, root)
+    target === nothing && return 2
 
     refuse_horizon(root) && return 3
 
     note("planning a migration from $root")
     ok("source: $(describe(root))")
+    target == "/" || ok("target: $target")
+    users, _ = local_names(target)
 
     found = human_users(root)
     if isempty(found)
@@ -59,11 +63,20 @@ function cmd_plan(args)
         ok(string(u.name, " (", u.uid, ":", u.gid, ") ", u.home,
                  ": ", files, " files, ", human(bytes),
                  ", ", groups, " groups", priv, state))
+        target == "/" && continue
+        dst = target_home(target, u.home)
+        if u.name in users
+            note("$(u.name): account exists in $target, would copy the home only")
+        elseif is_dir(dst) && !isempty(readdir(dst))
+            note("$(u.name): $dst already has files, would not touch it")
+        else
+            note("$(u.name): would go to $dst")
+        end
     end
 
     println()
     note("total: $(length(found)) accounts, $total_files files, $(human(total_bytes))")
     note("nothing was written")
-    note("next: pour run $root --users")
+    note("next: pour run $root --users" * (target == "/" ? "" : " --target $target"))
     return 0
 end

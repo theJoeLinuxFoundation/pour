@@ -24,6 +24,45 @@ function root_fixture(passwd, group)
     return root
 end
 
+"""Build a source root holding one account with a small home."""
+function source_fixture()
+    root = root_fixture(
+        "root:x:0:0:root:/root:/bin/sh\n" *
+        "maja:x:1000:1000:Maja:/home/maja:/bin/bash\n",
+        "root:x:0:\nwheel:x:10:maja\ndocker:x:969:maja\nmaja:x:1000:\n")
+    home = joinpath(root, "home", "maja")
+    mkpath(joinpath(home, ".config"))
+    write(joinpath(home, ".bashrc"), "export EDITOR=vim\n")
+    write(joinpath(home, ".config", "app.conf"), "x=1\n")
+    return root
+end
+
+"""Build a target root, as a fresh joe install looks, with the given passwd and group."""
+function target_fixture(passwd = "root:x:0:0:root:/root:/bin/sh\n", group = "root:x:0:\n")
+    target = mktempdir()
+    mkpath(joinpath(target, "etc"))
+    mkpath(joinpath(target, "home"))
+    write(joinpath(target, "etc", "passwd"), passwd)
+    write(joinpath(target, "etc", "group"), group)
+    return target
+end
+
+"""Run `f` with stdout sent to a file; return its result and everything it printed."""
+function captured(f)
+    path = tempname()
+    result = open(path, "w") do io
+        redirect_stdout(f, io)
+    end
+    return result, read(path, String)
+end
+
+"""Return a log and a runner that records commands and their stdin instead of running them."""
+function recorder()
+    log = Tuple{Vector{String},Union{Nothing,String}}[]
+    record(cmd, input = nothing) = (push!(log, (cmd.exec, input)); true)
+    return log, record
+end
+
 @testset "copy_tree keeps files, links and content" begin
     src = fixture()
     dst = joinpath(mktempdir(), "copy")
@@ -163,4 +202,71 @@ end
     write(joinpath(root, "etc", "os-release"),
           "NAME=\"Fedora Linux\"\nPRETTY_NAME=\"Fedora Linux 42\"\nID=fedora\n")
     @test !Pour.is_horizon(root)
+end
+
+@testset "options take values" begin
+    pos, flags, opts = Pour.parse_args(["/mnt/old", "--users", "--target", "/mnt/joe"])
+    @test pos == ["/mnt/old"]
+    @test flags == Set(["--users"])
+    @test opts["--target"] == "/mnt/joe"
+    _, _, opts = Pour.parse_args(["--target=/mnt/joe"])
+    @test opts["--target"] == "/mnt/joe"
+    _, _, opts = Pour.parse_args(["/mnt/old", "--target"])
+    @test opts["--target"] == ""
+end
+
+@testset "shadow commands get --prefix only for a target" begin
+    @test Pour.shadow_cmd("groupadd", "/", "-g", 1000, "--", "maja").exec ==
+          ["groupadd", "-g", "1000", "--", "maja"]
+    @test Pour.shadow_cmd("useradd", "/mnt/joe", "-M", "--", "maja").exec ==
+          ["useradd", "--prefix", "/mnt/joe", "-M", "--", "maja"]
+end
+
+@testset "run --target creates accounts and homes inside the target" begin
+    root = source_fixture()
+    target = target_fixture()
+    log, runner = recorder()
+    code, _ = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 0
+    cmds = first.(log)
+    @test all(c -> c[2:3] == ["--prefix", target], cmds)
+    @test ["groupadd", "--prefix", target, "-g", "1000", "--", "maja"] in cmds
+    @test ["useradd", "--prefix", target, "-M", "-u", "1000", "-g", "1000",
+           "-d", "/home/maja", "-s", "/bin/bash", "--", "maja"] in cmds
+    @test ["usermod", "--prefix", target, "-aG", "docker", "--", "maja"] in cmds
+    @test read(joinpath(target, "home", "maja", ".bashrc"), String) == "export EDITOR=vim\n"
+    @test isfile(joinpath(target, "home", "maja", ".config", "app.conf"))
+end
+
+@testset "a dry run with --target writes nothing" begin
+    root = source_fixture()
+    target = target_fixture()
+    log, runner = recorder()
+    code, _ = captured(() -> Pour.cmd_run([root, "--users", "--dry-run", "--target", target];
+                                          runner = runner))
+    @test code == 0
+    @test isempty(log)
+    @test !ispath(joinpath(target, "home", "maja"))
+end
+
+@testset "a target has to be a root" begin
+    root = source_fixture()
+    code, _ = captured(() -> Pour.cmd_run([root, "--users", "--target", mktempdir()]))
+    @test code == 2
+    code, _ = captured(() -> Pour.cmd_run([root, "--users", "--target"]))
+    @test code == 2
+    code, _ = captured(() -> Pour.cmd_plan([root, "--target", root]))
+    @test code == 2
+end
+
+@testset "plan --target reads the target" begin
+    root = source_fixture()
+    target = target_fixture()
+    code, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
+    @test code == 0
+    @test occursin("would go to $(joinpath(target, "home", "maja"))", out)
+    @test occursin("--target $target", out)
+    target = target_fixture("maja:x:1000:1000::/home/maja:/bin/sh\n")
+    _, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
+    @test occursin("account exists in $target", out)
 end

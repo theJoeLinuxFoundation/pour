@@ -13,6 +13,11 @@ pour packages <root>        map the old system's packages to dave names
 `plan` never writes. `run` refuses to touch a home directory that already
 holds files. `packages` prints a command and installs nothing.
 
+`plan` and `run` take `--target <dir>` to work against another root, such as
+a freshly installed disk mounted at /mnt/joe, instead of this machine:
+accounts and groups go into its etc/passwd and etc/group through shadow's
+`--prefix`, and homes into `<dir>/home`.
+
 And every verb refuses a Euri Linux: Horizon source outright, with exit code 3. Horizon is
 not something you migrate off **period**: update the machine with `horizon-update`
 instead.

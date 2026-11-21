@@ -40,7 +40,9 @@ pour $VERSION_STR
   pour packages <root>        map the old system's packages to dave names
 
 Options
-  --dry-run     never write to this machine or to <root>
+  --target DIR  create accounts and homes in the root at DIR, such as a
+                freshly installed disk, instead of on this machine
+  --dry-run     never write to this machine, to <root> or to the target
   --verify      compare hashes after copying (default on)
   --no-verify   skip the hash pass, counts only
   --help        this text
@@ -162,14 +164,63 @@ function human(bytes)
     return i == 1 ? "$(Int(v)) $(units[i])" : string(round(v; digits = 1), " ", units[i])
 end
 
-"""Split `args` into flags and positionals without a dependency."""
-function parse_args(args)
+"""Split `args` into positionals, flags and options without a dependency.
+
+The options named in `valued` take a value, as `--target DIR` or
+`--target=DIR`; one given with nothing after it gets the empty string.
+"""
+function parse_args(args; valued = ("--target",))
     flags = Set{String}()
     pos = String[]
-    for a in args
-        startswith(a, "--") ? push!(flags, a) : push!(pos, a)
+    opts = Dict{String,String}()
+    i = 1
+    while i <= length(args)
+        a = args[i]
+        eq = findfirst('=', a)
+        name = eq === nothing ? a : a[1:prevind(a, eq)]
+        if startswith(a, "--") && name in valued
+            if eq !== nothing
+                opts[name] = a[nextind(a, eq):end]
+            elseif i < length(args)
+                i += 1
+                opts[name] = args[i]
+            else
+                opts[name] = ""
+            end
+        elseif startswith(a, "--")
+            push!(flags, a)
+        else
+            push!(pos, a)
+        end
+        i += 1
     end
-    return pos, flags
+    return pos, flags, opts
+end
+
+"""Return the root that accounts are written into, or nothing after a fail line.
+
+Without `--target` that is this machine, `/`. With it, the directory must hold
+etc/passwd and etc/group, as a freshly installed joe does, and must not be
+the source root itself.
+"""
+function target_root(opts, source)
+    haskey(opts, "--target") || return "/"
+    dir = opts["--target"]
+    if isempty(dir)
+        fail("--target needs a directory: --target /mnt/joe")
+        return nothing
+    end
+    dir = abspath(dir)
+    dir = dir == "/" ? dir : rstrip(dir, '/')
+    if !(is_file(joinpath(dir, "etc", "passwd")) && is_file(joinpath(dir, "etc", "group")))
+        fail("$dir is not a target root: no etc/passwd and etc/group")
+        return nothing
+    end
+    if realpath(dir) == realpath(source)
+        fail("$dir is the source root, not a target")
+        return nothing
+    end
+    return String(dir)
 end
 
 include("scan.jl")

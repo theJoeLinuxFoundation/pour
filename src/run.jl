@@ -94,11 +94,104 @@ function verify_sample(src, dst; limit = 200)
     return (checked = checked, bad = bad)
 end
 
-"""Return the names in the passwd and group files under `target`, this machine by default."""
-function local_names(target = "/")
-    users = Set(f[1] for f in read_passwd(joinpath(target, "etc", "passwd")) if length(f) >= 7)
-    groups = Set(f[1] for f in read_passwd(joinpath(target, "etc", "group")) if length(f) >= 3)
-    return users, groups
+"""The names and ids already taken in a root's passwd and group files."""
+struct Taken
+    users::Dict{String,Int}
+    uids::Dict{Int,String}
+    groups::Dict{String,Int}
+    gids::Dict{Int,String}
+end
+
+"""Record that a user name and uid are taken."""
+take_user!(t::Taken, name, uid) = (t.users[name] = uid; get!(t.uids, uid, name); t)
+
+"""Record that a group name and gid are taken."""
+take_group!(t::Taken, name, gid) = (t.groups[name] = gid; get!(t.gids, gid, name); t)
+
+"""Read the names and ids taken under `target`, this machine by default."""
+function taken_ids(target = "/")
+    t = Taken(Dict(), Dict(), Dict(), Dict())
+    for f in read_passwd(joinpath(target, "etc", "passwd"))
+        length(f) >= 3 || continue
+        id = tryparse(Int, f[3])
+        id === nothing || take_user!(t, f[1], id)
+    end
+    for f in read_passwd(joinpath(target, "etc", "group"))
+        length(f) >= 3 || continue
+        id = tryparse(Int, f[3])
+        id === nothing || take_group!(t, f[1], id)
+    end
+    return t
+end
+
+"""Return true for a user or group name that shadow takes and no command line misreads.
+
+Letters, digits, `_`, `.` and `-`, starting with a letter, digit or `_`,
+optionally ending in `\$`, not all digits and at most 32 characters. That
+rules out a leading dash, read as an option, and a comma, read by usermod
+as a second group.
+"""
+function valid_name(name)
+    length(name) <= 32 || return false
+    occursin(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$", name) || return false
+    return !all(isdigit, name)
+end
+
+"""Return the name of an account's primary group in the source, or its own name without one."""
+function primary_group(root, u)
+    for f in read_passwd(joinpath(root, "etc", "group"))
+        length(f) >= 3 && tryparse(Int, f[3]) == u.gid && return f[1]
+    end
+    return u.name
+end
+
+"""Return why an account cannot be created in the target, or nothing when it can.
+
+Its name and uid have to be free there. Its primary group has to be either
+absent, so it can be created with the source's gid, or present with the same
+name and gid, as `users` often is; anything else would hand the account
+someone else's group.
+"""
+function account_conflict(u, group, ids)
+    valid_name(u.name) || return "the name $(u.name) is not one useradd takes"
+    haskey(ids.users, u.name) && return "the name $(u.name) is taken in the target"
+    haskey(ids.uids, u.uid) && return "uid $(u.uid) is taken by $(ids.uids[u.uid]) in the target"
+    valid_name(group) || return "its group name $group is not one groupadd takes"
+    by_gid = get(ids.gids, u.gid, nothing)
+    by_gid === nothing || by_gid == group ||
+        return "gid $(u.gid) is taken by group $by_gid in the target"
+    by_name = get(ids.groups, group, nothing)
+    by_name === nothing || by_name == u.gid ||
+        return "group $group has gid $by_name in the target, not $(u.gid)"
+    return nothing
+end
+
+"""Check an account against the source and the target before anything is written.
+
+Returns its normalised `home`, the `src` and `dst` of that home, its primary
+`group`, and `problem`: why it has to be skipped, or nothing when it can go.
+`src` and `dst` are empty when the home path itself is refused.
+"""
+function check_account(u, root, target, ids)
+    home = safe_home(u.home)
+    if home === nothing
+        return (problem = "home $(u.home) is not /home/<name>", home = u.home,
+                src = "", dst = "", group = u.name)
+    end
+    src = source_path(root, home)
+    dst = target_home(target, home)
+    group = primary_group(root, u)
+    link = symlink_on_path(target, dst)
+    problem = if !is_dir(src)
+        "home missing in source, $src"
+    elseif link !== nothing
+        "$link is a symlink, not writing through it"
+    elseif is_dir(dst) && !isempty(readdir(dst))
+        "$dst already has files, not touching it"
+    else
+        account_conflict(u, group, ids)
+    end
+    return (problem = problem, home = home, src = src, dst = dst, group = group)
 end
 
 """Return the supplemental groups a user belongs to in the source root."""
@@ -201,13 +294,6 @@ function password_reason(state)
     return "uses a hash scheme pour does not know"
 end
 
-"""Return true when some group under `target`, this machine by default, already holds this gid."""
-function gid_taken(gid, target = "/")
-    return any(read_passwd(joinpath(target, "etc", "group"))) do f
-        length(f) >= 3 && f[3] == string(gid)
-    end
-end
-
 """Build a shadow command line that edits the passwd and group files under `target`.
 
 On this machine's own root it is the plain tool. Anywhere else the tool gets
@@ -220,10 +306,31 @@ function shadow_cmd(tool, target, args...)
     return Cmd([tool; prefix; String[string(a) for a in args]])
 end
 
-"""Run an external command, with `input` on its stdin when given."""
+"""Run an external command with `input` on its stdin; return true when it exits zero.
+
+Its output is collected instead of mixed into pour's: on success each line
+becomes a note, on failure it goes into the fail line. A command that cannot
+start or exits non-zero is a fail line and false, never an exception.
+"""
 function run_cmd(cmd, input = nothing)
-    run(input === nothing ? cmd : pipeline(cmd; stdin = IOBuffer(input)))
-    return true
+    out = IOBuffer()
+    proc = try
+        run(pipeline(ignorestatus(cmd); stdin = input === nothing ? devnull : IOBuffer(input),
+                     stdout = out, stderr = out))
+    catch e
+        e isa InterruptException && rethrow()
+        fail("$(cmd.exec[1]) could not run: $(sprint(showerror, e))")
+        return false
+    end
+    lines = split(strip(String(take!(out))), '\n'; keepempty = false)
+    if success(proc)
+        foreach(line -> note("  $(cmd.exec[1]): $line"), lines)
+        return true
+    end
+    how = proc.termsignal > 0 ? "was killed by signal $(proc.termsignal)" :
+          "failed with exit code $(proc.exitcode)"
+    fail("$(cmd.exec[1]) $how" * (isempty(lines) ? "" : ": " * join(lines, "; ")))
+    return false
 end
 
 """Map a home path from the source's passwd to where it lands under `target`."""
@@ -258,9 +365,111 @@ function symlink_on_path(base, path)
     return nothing
 end
 
+"""Run one shadow command against the target, or only say so in a dry run.
+
+`what` pairs the step with its past tense, such as `"create user 1000" =>
+"created user 1000"`, for the ok line. A failed step gets a fail line naming
+the account, after the one `run_cmd` printed. Returns false only on failure.
+"""
+function step(ctx, name, what, tool, args...; input = nothing)
+    if ctx.dry
+        ok("$name: would $(first(what))")
+        return true
+    end
+    if !ctx.runner(shadow_cmd(tool, ctx.target, args...), input)
+        fail("$name: could not $(first(what))")
+        return false
+    end
+    ok("$name: $(last(what))")
+    return true
+end
+
+"""Migrate one account: create its group and user, carry its password, join
+its groups and copy its home.
+
+Every problem is a fail line; the result is how many there were. An account
+that fails `check_account`, or whose group or user cannot be created, is left
+alone after the first.
+"""
+function migrate_account(u, ctx)
+    c = check_account(u, ctx.root, ctx.target, ctx.ids)
+    if c.problem !== nothing
+        fail("$(u.name): $(c.problem), skipping")
+        return 1
+    end
+
+    if !haskey(ctx.ids.groups, c.group)
+        step(ctx, u.name, "create group $(c.group) ($(u.gid))" => "created group $(c.group) ($(u.gid))",
+             "groupadd", "-g", u.gid, "--", c.group) || return 1
+        take_group!(ctx.ids, c.group, u.gid)
+    end
+    step(ctx, u.name, "create user $(u.uid)" => "created user $(u.uid)",
+         "useradd", "-M", "-u", u.uid, "-g", u.gid, "-d", c.home, "-s", u.shell,
+         "--", u.name) || return 1
+    take_user!(ctx.ids, u.name, u.uid)
+    problems = 0
+
+    state = password_state(ctx.hashes, u.name)
+    if carries_password(state)
+        # The hash goes on stdin, never on a command line where ps can see it.
+        step(ctx, u.name, "carry the password ($state)" => "carried the password ($state)",
+             "chpasswd", "-e"; input = "$(u.name):$(ctx.hashes[u.name])\n") || (problems += 1)
+    else
+        note("$(u.name): password $(password_reason(state)), account left locked")
+        note("  set one on the new system with: passwd $(u.name)")
+    end
+
+    for (gname, gid) in source_groups(ctx.root, u.name)
+        gname in ("wheel", "sudo", "admin") && continue
+        gname == c.group && continue
+        if !valid_name(gname)
+            fail("$(u.name): group name $gname is not one groupadd takes, not joining it")
+            problems += 1
+            continue
+        end
+        if !haskey(ctx.ids.groups, gname)
+            if haskey(ctx.ids.gids, gid)
+                fail("$(u.name): gid $gid of group $gname is taken by " *
+                     "$(ctx.ids.gids[gid]) in the target, not joining it")
+                problems += 1
+                continue
+            end
+            if !step(ctx, u.name, "create group $gname ($gid)" => "created group $gname ($gid)",
+                     "groupadd", "-g", gid, "--", gname)
+                problems += 1
+                continue
+            end
+            take_group!(ctx.ids, gname, gid)
+        end
+        step(ctx, u.name, "join group $gname" => "joined group $gname",
+             "usermod", "-aG", gname, "--", u.name) || (problems += 1)
+    end
+
+    stats = copy_tree(c.src, c.dst; dry = ctx.dry, owner = (uid = u.uid, gid = u.gid))
+    ok(string(u.name, ": ", stats.files, " files, ", stats.links,
+             " symlinks, ", human(stats.bytes), ctx.dry ? " (planned)" : ""))
+    stats.stripped > 0 && note(string(u.name, ": ", ctx.dry ? "would drop" : "dropped",
+                                      " setuid/setgid from ", stats.stripped, " files"))
+    stats.chowned > 0 && note(string(u.name, ": ", ctx.dry ? "would give" : "gave", " ",
+                                     stats.chowned, " entries owned by another uid to ", u.name))
+
+    if ctx.verify && !ctx.dry
+        v = verify_sample(c.src, c.dst)
+        if v.bad == 0
+            ok("$(u.name): verified $(v.checked) files")
+        else
+            fail("$(u.name): $(v.bad) of $(v.checked) files differ")
+            problems += 1
+        end
+    end
+    return problems
+end
+
 """The `run` verb: create accounts and copy their homes.
 
-`runner` executes each external command; tests pass one that records them.
+`runner` executes each external command, see `run_cmd`; tests pass one that
+records them. A problem with one account is a fail line and a non-zero exit,
+and the other accounts still go ahead.
 """
 function cmd_run(args; runner = run_cmd)
     pos, flags, opts = parse_args(args)
@@ -286,104 +495,19 @@ function cmd_run(args; runner = run_cmd)
 
     note(dry ? "dry run, nothing will be written" : "migrating from $root")
     target == "/" || note("writing accounts and homes into $target")
-    users, groups = local_names(target)
-    hashes = source_hashes(root)
+    ctx = (root = root, target = target, dry = dry, verify = verify, runner = runner,
+           ids = taken_ids(target), hashes = source_hashes(root))
     failures = 0
 
     for u in human_users(root)
-        home = safe_home(u.home)
-        if home === nothing
-            fail("$(u.name): home $(u.home) is not /home/<name>, skipping")
-            failures += 1
-            continue
+        problems = try
+            migrate_account(u, ctx)
+        catch e
+            e isa InterruptException && rethrow()
+            fail("$(u.name): $(sprint(showerror, e))")
+            1
         end
-        src = source_path(root, home)
-        dst = target_home(target, home)
-
-        if !isdir(src)
-            fail("$(u.name): home missing in source, $src")
-            failures += 1
-            continue
-        end
-        link = symlink_on_path(target, dst)
-        if link !== nothing
-            fail("$(u.name): $link is a symlink, not writing through it")
-            failures += 1
-            continue
-        end
-        if isdir(dst) && !isempty(readdir(dst))
-            fail("$(u.name): $dst already has files, not touching it")
-            failures += 1
-            continue
-        end
-
-        if !(u.name in users)
-            if !gid_taken(u.gid, target) && !(u.name in groups)
-                if dry
-                    ok("$(u.name): would create group $(u.name) ($(u.gid))")
-                else
-                    runner(shadow_cmd("groupadd", target, "-g", u.gid, "--", u.name))
-                    ok("$(u.name): created group $(u.name) ($(u.gid))")
-                end
-            end
-            if dry
-                ok("$(u.name): would create user $(u.uid)")
-            else
-                runner(shadow_cmd("useradd", target, "-M", "-u", u.uid, "-g", u.gid,
-                                  "-d", home, "-s", u.shell, "--", u.name))
-                ok("$(u.name): created user $(u.uid)")
-            end
-            state = password_state(hashes, u.name)
-            if !carries_password(state)
-                note("$(u.name): password $(password_reason(state)), account left locked")
-                note("  set one on the new system with: passwd $(u.name)")
-            elseif dry
-                ok("$(u.name): would carry the password ($state)")
-            else
-                # The hash goes on stdin, never on a command line where ps can see it.
-                runner(shadow_cmd("chpasswd", target, "-e"), "$(u.name):$(hashes[u.name])\n")
-                ok("$(u.name): carried the password ($state)")
-            end
-        else
-            note("$(u.name): account exists here, copying home only")
-        end
-
-        for (gname, gid) in source_groups(root, u.name)
-            gname in ("wheel", "sudo", "admin") && continue
-            if !(gname in groups) && !gid_taken(gid, target)
-                if dry
-                    ok("$(u.name): would create group $gname ($gid)")
-                else
-                    runner(shadow_cmd("groupadd", target, "-g", gid, "--", gname))
-                    ok("$(u.name): created group $gname ($gid)")
-                end
-            end
-            if dry
-                ok("$(u.name): would join group $gname")
-            else
-                runner(shadow_cmd("usermod", target, "-aG", gname, "--", u.name))
-                ok("$(u.name): joined group $gname")
-            end
-        end
-
-        stats = copy_tree(src, dst; dry = dry, owner = (uid = u.uid, gid = u.gid))
-        ok(string(u.name, ": ", stats.files, " files, ", stats.links,
-                 " symlinks, ", human(stats.bytes), dry ? " (planned)" : ""))
-        stats.stripped > 0 && note(string(u.name, ": ", dry ? "would drop" : "dropped",
-                                          " setuid/setgid from ", stats.stripped, " files"))
-        stats.chowned > 0 && note(string(u.name, ": ", dry ? "would give" : "gave", " ",
-                                         stats.chowned, " entries owned by another uid to ",
-                                         u.name))
-
-        if verify && !dry
-            v = verify_sample(src, dst)
-            if v.bad == 0
-                ok("$(u.name): verified $(v.checked) files")
-            else
-                fail("$(u.name): $(v.bad) of $(v.checked) files differ")
-                failures += 1
-            end
-        end
+        failures += problems > 0
     end
 
     for u in human_users(root)

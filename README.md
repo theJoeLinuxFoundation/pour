@@ -11,9 +11,11 @@ pour packages <root>        map the old system's packages to dave names
 ```
 
 `plan` never writes. `run` refuses to touch a home directory that already
-holds files, skips any account whose home is not `/home/<name>`, and never
-writes through a symlink on the way to a home. `packages` prints a command
-and installs nothing.
+holds files, skips any account whose home is not `/home/<name>` or whose
+name, uid or primary gid is already taken where it would go, and never
+writes through a symlink on the way to a home. A problem with one account is
+a `[FAIL]` line and a non-zero exit; the other accounts still go ahead.
+`packages` prints a command and installs nothing.
 
 `plan` and `run` take `--target <dir>` to work against another root, such as
 a freshly installed disk mounted at /mnt/joe, instead of this machine:

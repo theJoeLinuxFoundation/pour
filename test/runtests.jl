@@ -61,10 +61,13 @@ function captured(f)
     return result, read(path, String)
 end
 
-"""Return a log and a runner that records commands and their stdin instead of running them."""
-function recorder()
+"""Return a log and a runner that records commands and their stdin instead of running them.
+
+Commands for which `failing` is true are recorded and then reported as failed.
+"""
+function recorder(; failing = c -> false)
     log = Tuple{Vector{String},Union{Nothing,String}}[]
-    record(cmd, input = nothing) = (push!(log, (cmd.exec, input)); true)
+    record(cmd, input = nothing) = (push!(log, (cmd.exec, input)); !failing(cmd.exec))
     return log, record
 end
 
@@ -273,7 +276,7 @@ end
     @test occursin("--target $target", out)
     target = target_fixture("maja:x:1000:1000::/home/maja:/bin/sh\n")
     _, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
-    @test occursin("account exists in $target", out)
+    @test occursin("maja: the name maja is taken in the target, would skip", out)
 end
 
 @testset "password hashes are named by scheme" begin
@@ -430,4 +433,112 @@ end
     @test code == 0
     @test occursin("maja: dropped setuid/setgid from 1 files", out)
     @test filemode(joinpath(target, "home", "maja", ".bashrc")) & 0o7777 == 0o755
+end
+
+@testset "run_cmd turns failures into fail lines" begin
+    @test captured(() -> Pour.run_cmd(`true`))[1]
+    code, out = captured(() -> Pour.run_cmd(`sh -c 'echo oops >&2; exit 4'`))
+    @test !code
+    @test occursin("[FAIL] sh failed with exit code 4: oops", out)
+    code, out = captured(() -> Pour.run_cmd(`pour-no-such-command-here`))
+    @test !code
+    @test occursin("[FAIL] pour-no-such-command-here could not run", out)
+    code, out = captured(() -> Pour.run_cmd(`cat`, "fed on stdin\n"))
+    @test code
+    @test occursin("cat: fed on stdin", out)
+end
+
+@testset "names that a command line could misread are refused" begin
+    @test Pour.valid_name("maja")
+    @test Pour.valid_name("john.doe")
+    @test Pour.valid_name("build\$")
+    @test !Pour.valid_name("-oops")
+    @test !Pour.valid_name("audio,wheel")
+    @test !Pour.valid_name("1000")
+    @test !Pour.valid_name("")
+    @test !Pour.valid_name("a"^33)
+end
+
+@testset "a uid, name or gid taken in the target skips the account" begin
+    cases = [
+        ("joe:x:1000:1000::/home/joe:/bin/sh\n", "root:x:0:\n",
+         "uid 1000 is taken by joe in the target"),
+        ("maja:x:1001:1001::/home/maja:/bin/sh\n", "root:x:0:\n",
+         "the name maja is taken in the target"),
+        ("root:x:0:0::/root:/bin/sh\n", "users:x:1000:\n",
+         "gid 1000 is taken by group users in the target"),
+        ("root:x:0:0::/root:/bin/sh\n", "maja:x:1001:\n",
+         "group maja has gid 1001 in the target, not 1000"),
+    ]
+    for (passwd, group, why) in cases
+        root = source_fixture()
+        target = target_fixture(passwd, group)
+        log, runner = recorder()
+        code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target];
+                                                runner = runner))
+        @test code == 1
+        @test isempty(log)
+        @test occursin("[FAIL] maja: $why, skipping", out)
+        @test isempty(readdir(joinpath(target, "home")))
+        code, out = captured(() -> Pour.cmd_plan([root, "--target", target]))
+        @test code == 0
+        @test occursin("maja: $why, would skip", out)
+    end
+end
+
+@testset "a primary group the target already has is reused" begin
+    root = root_fixture(
+        "maja:x:1000:100::/home/maja:/bin/bash\ntoji:x:1001:100::/home/toji:/bin/sh\n",
+        "users:x:100:\n")
+    mkpath(joinpath(root, "home", "maja"))
+    mkpath(joinpath(root, "home", "toji"))
+    for group in ("users:x:100:\n", "root:x:0:\n")
+        target = target_fixture("root:x:0:0::/root:/bin/sh\n", group)
+        log, runner = recorder()
+        code, _ = captured(() -> Pour.cmd_run([root, "--users", "--target", target];
+                                              runner = runner))
+        @test code == 0
+        groupadds = filter(c -> c[1] == "groupadd", first.(log))
+        # created once when the target lacks it, never when it has it already
+        @test length(groupadds) == (startswith(group, "users") ? 0 : 1)
+        @test count(c -> c[1] == "useradd", first.(log)) == 2
+    end
+end
+
+@testset "a failing command is a fail line, not an exception" begin
+    root = source_fixture()
+    write(joinpath(root, "etc", "passwd"),
+          "maja:x:1000:1000::/home/maja:/bin/bash\ntoji:x:1001:1001::/home/toji:/bin/sh\n")
+    mkpath(joinpath(root, "home", "toji"))
+    write(joinpath(root, "home", "toji", "notes"), "hi")
+    target = target_fixture()
+    log, runner = recorder(failing = c -> c[1] == "useradd" && c[end] == "maja")
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 1
+    @test occursin("[FAIL] maja: could not create user 1000", out)
+    @test occursin("1 account(s) had problems", out)
+    # maja stops at the failed useradd; toji still goes ahead
+    @test !any(c -> c[1] == "chpasswd", first.(log))
+    @test !ispath(joinpath(target, "home", "maja"))
+    @test read(joinpath(target, "home", "toji", "notes"), String) == "hi"
+
+    log, runner = recorder(failing = c -> c[1] == "usermod")
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target_fixture()];
+                                            runner = runner))
+    @test code == 1
+    @test occursin("[FAIL] maja: could not join group docker", out)
+end
+
+@testset "groups with a bad name or a taken gid are not joined" begin
+    root = source_fixture()
+    write(joinpath(root, "etc", "group"),
+          "maja:x:1000:\naudio,wheel:x:63:maja\nplugdev:x:46:maja\n")
+    target = target_fixture("root:x:0:0::/root:/bin/sh\n", "root:x:0:\nlp:x:46:\n")
+    log, runner = recorder()
+    code, out = captured(() -> Pour.cmd_run([root, "--users", "--target", target]; runner = runner))
+    @test code == 1
+    @test occursin("group name audio,wheel is not one groupadd takes", out)
+    @test occursin("gid 46 of group plugdev is taken by lp in the target", out)
+    @test !any(c -> c[1] == "usermod", first.(log))
+    @test isfile(joinpath(target, "home", "maja", ".bashrc"))
 end

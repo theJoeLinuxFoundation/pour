@@ -40,7 +40,6 @@ function cmd_plan(args)
     note("planning a migration from $root")
     ok("source: $(describe(root))")
     target == "/" || ok("target: $target")
-    users, _ = local_names(target)
 
     found = human_users(root)
     if isempty(found)
@@ -48,46 +47,43 @@ function cmd_plan(args)
         return 1
     end
 
+    ids = taken_ids(target)
     hashes = source_hashes(root)
     total_files = 0
     total_bytes = 0
     planned = 0
     for u in found
-        home = safe_home(u.home)
-        if home === nothing
-            fail("$(u.name): home $(u.home) is not /home/<name>, would skip")
+        c = check_account(u, root, target, ids)
+        if isempty(c.src)
+            fail("$(u.name): $(c.problem), would skip")
             continue
         end
-        planned += 1
-        src = source_path(root, home)
-        files, bytes = measure(src)
-        total_files += files
-        total_bytes += bytes
+        files, bytes = measure(c.src)
         groups = length(source_groups(root, u.name))
         priv = source_privileged(root, u.name) ? ", sudo" : ""
-        state = is_dir(src) ? "" : " (home missing)"
         password = password_state(hashes, u.name)
-        ok(string(u.name, " (", u.uid, ":", u.gid, ") ", home,
+        ok(string(u.name, " (", u.uid, ":", u.gid, ") ", c.home,
                  ": ", files, " files, ", human(bytes),
-                 ", ", groups, " groups", priv, ", password ", password, state))
+                 ", ", groups, " groups", priv, ", password ", password))
+        if c.problem !== nothing
+            fail("$(u.name): $(c.problem), would skip")
+            continue
+        end
         carries_password(password) ||
             note("$(u.name): password $(password_reason(password)), would stay locked")
-        target == "/" && continue
-        dst = target_home(target, home)
-        link = symlink_on_path(target, dst)
-        if link !== nothing
-            note("$(u.name): $link is a symlink, would not write through it")
-        elseif u.name in users
-            note("$(u.name): account exists in $target, would copy the home only")
-        elseif is_dir(dst) && !isempty(readdir(dst))
-            note("$(u.name): $dst already has files, would not touch it")
-        else
-            note("$(u.name): would go to $dst")
-        end
+        target == "/" || note("$(u.name): would go to $(c.dst)")
+        # Later accounts see this one's name, uid and group as taken, as run would.
+        haskey(ids.groups, c.group) || take_group!(ids, c.group, u.gid)
+        take_user!(ids, u.name, u.uid)
+        planned += 1
+        total_files += files
+        total_bytes += bytes
     end
 
     println()
     note("total: $planned accounts, $total_files files, $(human(total_bytes))")
+    skipped = length(found) - planned
+    skipped > 0 && note("$skipped account(s) would be skipped")
     note("nothing was written")
     note("next: pour run $root --users" * (target == "/" ? "" : " --target $target"))
     return 0

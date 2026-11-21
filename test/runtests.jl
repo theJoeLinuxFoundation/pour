@@ -542,3 +542,41 @@ end
     @test !any(c -> c[1] == "usermod", first.(log))
     @test isfile(joinpath(target, "home", "maja", ".bashrc"))
 end
+
+@testset "an rpm database is recognised and reported as unreadable" begin
+    for rel in (joinpath("var", "lib", "rpm", "rpmdb.sqlite"),
+                joinpath("var", "lib", "rpm", "Packages"),
+                joinpath("usr", "lib", "sysimage", "rpm", "rpmdb.sqlite"))
+        root = root_fixture("maja:x:1000:1000::/home/maja:/bin/bash\n", "maja:x:1000:\n")
+        mkpath(dirname(joinpath(root, rel)))
+        write(joinpath(root, rel), "SQLite format 3\0")
+        found = Pour.installed_packages(root)
+        @test found.db == "rpm"
+        @test !found.readable
+        @test found.path == joinpath(root, rel)
+        code, out = captured(() -> Pour.cmd_packages([root]))
+        @test code == 1
+        @test occursin("pour cannot read rpm databases yet", out)
+    end
+    root = root_fixture("maja:x:1000:1000::/home/maja:/bin/bash\n", "maja:x:1000:\n")
+    mkpath(joinpath(root, "var", "lib", "rpm"))
+    write(joinpath(root, "var", "lib", "rpm", "stray-1.0.rpm"), "")
+    @test Pour.installed_packages(root).db == "unknown"
+    code, out = captured(() -> Pour.cmd_packages([root]))
+    @test code == 1
+    @test occursin("no package database found", out)
+end
+
+@testset "dpkg and apk databases are read" begin
+    root = root_fixture("maja:x:1000:1000::/home/maja:/bin/bash\n", "maja:x:1000:\n")
+    mkpath(joinpath(root, "var", "lib", "dpkg"))
+    write(joinpath(root, "var", "lib", "dpkg", "status"),
+          "Package: fd-find\nStatus: install ok installed\n\nPackage: vim\n")
+    found = Pour.installed_packages(root)
+    @test found.db == "dpkg"
+    @test found.readable
+    @test found.names == ["fd-find", "vim"]
+    code, out = captured(() -> Pour.cmd_packages([root]))
+    @test code == 0
+    @test occursin("dave install fd vim", out)
+end

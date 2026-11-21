@@ -15,7 +15,8 @@ holds files, skips any account whose home is not `/home/<name>` or whose
 name, uid or primary gid is already taken where it would go, and never
 writes through a symlink on the way to a home. A problem with one account is
 a `[FAIL]` line and a non-zero exit; the other accounts still go ahead.
-`packages` prints a command and installs nothing.
+`packages` prints a command and installs nothing. It reads dpkg and apk
+databases; an rpm database is recognised but cannot be read yet.
 
 `plan` and `run` take `--target <dir>` to work against another root, such as
 a freshly installed disk mounted at /mnt/joe, instead of this machine:
